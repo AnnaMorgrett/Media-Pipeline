@@ -20,15 +20,6 @@ else
 fi
 
 # ── Environment & Path Discovery ──────────────────────────────────────────────
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.env"
-if [[ -f "$CONFIG_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-    set +a
-fi
-
 if [[ -d "/data/data/com.termux" || -n "${TERMUX_VERSION:-}" ]]; then
     SD="${MEDIA_DIR:-/storage/emulated/0}"
 else
@@ -40,7 +31,7 @@ readonly INPUT_DIRS=(
     "$SD/Download/yt-dlp"
 )
 readonly ASSET_OUT="$SD/Pictures/TikTok_Assets"
-readonly LOG="$SCRIPT_DIR/media_processor_log.txt"
+readonly LOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/media_processor_log.txt"
 
 # ── Usage & Help ──────────────────────────────────────────────────────────────
 show_help() {
@@ -91,7 +82,9 @@ scan_queue() {
     [[ -s "$qf" ]] || return 0
     while IFS= read -r f; do
         [[ -f "$f" ]] && files+=("$f")
-    done < <(sort -u "$qf")
+    done < <(sort -u "$qf" | while IFS= read -r q; do
+                [[ -f "$q" ]] && printf '%s\t%s\n' "$(stat -c %Y "$q" 2>/dev/null || echo 0)" "$q"
+             done | sort -t "$(printf '\t')" -k1,1n -s | cut -f2-)
     (( ${#files[@]} > 0 )) || return 0
     if command -v termux-media-scan &>/dev/null; then
         rc=0

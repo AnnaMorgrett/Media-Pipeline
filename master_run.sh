@@ -4,7 +4,7 @@
 #  @brief       Central orchestrator for media processing pipeline.
 #  @author      Anna Morgrett (https://github.com/AnnaMorgrett/Termux)
 #  @license     MIT
-#  @version     2.1.0
+#  @version     3.0.0
 #
 #  Responsibilities:
 #  -----------------
@@ -28,13 +28,6 @@ else
 fi
 
 readonly SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPTS_DIR}/config.env"
-if [[ -f "$CONFIG_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-    set +a
-fi
 
 # ── Environment & Config ──────────────────────────────────────────────────────
 if [[ -d "/data/data/com.termux" || -n "${TERMUX_VERSION:-}" ]]; then
@@ -45,9 +38,8 @@ else
     LOCKFILE="${TMPDIR:-/tmp}/media_pipeline.lock"
 fi
 
-readonly LOG="$SCRIPTS_DIR/media_processor_log.txt"
+readonly LOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/media_processor_log.txt"
 readonly LOG_MAX="${LOG_MAX_BYTES:-$(( 2 * 1024 * 1024 ))}"  # 2 MB default
-readonly AUTO_UPDATE_YTDLP="${AUTO_UPDATE_YTDLP:-true}"
 
 # ── Usage & Help ──────────────────────────────────────────────────────────────
 show_help() {
@@ -62,6 +54,8 @@ Environment Overrides:
   LOG_MAX_BYTES    Maximum log file size in bytes before rotation (Default: $LOG_MAX)
 
 Options:
+  --percent N      Audio peak target for this run: 0 = -9.0 dB ... 100 = -0.1 dB
+                   (Target dB = -9 + 8.9 x N/100). Saved default: "q percent N".
   -h, --help       Display this documentation.
 EOF
 }
@@ -69,6 +63,14 @@ EOF
 if [[ $# -ge 1 && ("$1" == "-h" || "$1" == "--help") ]]; then
     show_help
     exit 0
+fi
+
+# --percent N : audio peak target for THIS run only (0 = -9.0 dB ... 100 = -0.1 dB). Saved default: q percent N
+if [[ "${1:-}" == "--percent" ]]; then
+    if ! [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || ! awk -v p="${2:-}" 'BEGIN{exit !(p>=0 && p<=100)}'; then
+        echo "Usage: tiktok [--percent 0-100]" >&2; exit 64
+    fi
+    export PEAK_PERCENT="$2"; shift 2
 fi
 
 # ── Logging & Trimming ────────────────────────────────────────────────────────
@@ -123,52 +125,20 @@ for bin in ffmpeg ffprobe awk; do
 done
 
 # ── 3. Silent Dependency Update (yt-dlp) ───────────────────────────────────────
-if [[ "$AUTO_UPDATE_YTDLP" == "true" ]]; then
-    printf "${C_BLUE}[1/3] Checking yt-dlp dependencies...${C_RESET}\n"
-    log "Checking yt-dlp updates..."
-    if command -v yt-dlp &>/dev/null; then
-        { yt-dlp -U 2>&1 || pip install --upgrade yt-dlp 2>&1 || python3 -m pip install --upgrade yt-dlp 2>&1 || python -m pip install --upgrade yt-dlp 2>&1 || true; } >> "$LOG"
-    else
-        { pip install yt-dlp 2>&1 || python3 -m pip install yt-dlp 2>&1 || python -m pip install yt-dlp 2>&1 || true; } >> "$LOG"
-    fi
-    log "yt-dlp update routine finished."
-    printf "${C_GREEN}[✓] yt-dlp is up to date.${C_RESET}\n"
+printf "${C_BLUE}[1/3] Checking yt-dlp dependencies...${C_RESET}\n"
+log "Checking yt-dlp updates..."
+if command -v yt-dlp &>/dev/null; then
+    { yt-dlp -U 2>&1 || pip install --upgrade yt-dlp 2>&1 || python3 -m pip install --upgrade yt-dlp 2>&1 || python -m pip install --upgrade yt-dlp 2>&1 || true; } >> "$LOG"
 else
-    printf "${C_BLUE}[1/3] Skipping yt-dlp update check (disabled in config.env).${C_RESET}\n"
+    { pip install yt-dlp 2>&1 || python3 -m pip install yt-dlp 2>&1 || python -m pip install yt-dlp 2>&1 || true; } >> "$LOG"
 fi
+log "yt-dlp update routine finished."
+printf "${C_GREEN}[✓] yt-dlp is up to date.${C_RESET}\n"
 
 # ── Shared media-scan queue (scripts queue paths, scanned once at the end) ───
 export MEDIA_SCAN_QUEUE="$(mktemp)"
-scan_queue() {
-    # Scan every queued file in ONE call (deduped, existing files only).
-    local qf="$1" f out rc=1 i
-    local -a files=() chunk=()
-    [[ -s "$qf" ]] || return 0
-    while IFS= read -r f; do
-        [[ -f "$f" ]] && files+=("$f")
-    done < <(sort -u "$qf")
-    (( ${#files[@]} > 0 )) || return 0
-    if command -v termux-media-scan &>/dev/null; then
-        rc=0
-        for (( i=0; i<${#files[@]}; i+=50 )); do
-            chunk=("${files[@]:i:50}")
-            out=$(termux-media-scan "${chunk[@]}" </dev/null 2>&1) || rc=$?
-        done
-    elif command -v am &>/dev/null; then
-        rc=0
-        for f in "${files[@]}"; do
-            am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE \
-               -d "file://$f" </dev/null >/dev/null 2>&1 || rc=$?
-        done
-    else
-        out="no termux-media-scan or am found"
-    fi
-    if (( rc == 0 )); then
-        printf "${C_GREEN}[✓] Media scan:${C_RESET} %d file(s) added to gallery\n" "${#files[@]}"
-    else
-        printf "${C_YELLOW}[!] Media scan failed (install Termux:API app + 'pkg install termux-api'): %s${C_RESET}\n" "${out:-}" >&2
-    fi
-}
+# shellcheck source=scan_lib.sh
+source "$SCRIPTS_DIR/scan_lib.sh"
 
 # ── 4. Asset Relocation Stage ─────────────────────────────────────────────────
 printf "${C_BLUE}[2/3] Invoking asset relocation module...${C_RESET}\n"
@@ -180,14 +150,25 @@ else
     log "WARNING: move_assets.sh not found"
 fi
 
-# ── 5. Video Normalization Stage ──────────────────────────────────────────────
-printf "${C_BLUE}[3/3] Invoking video normalization module...${C_RESET}\n"
-if [[ -f "$SCRIPTS_DIR/normalize.sh" ]]; then
-    log "Invoking normalize.sh..."
-    bash "$SCRIPTS_DIR/normalize.sh"
+# ── 5. Video Stage: queue folder videos, then run the queue worker ───────────
+# One pipeline: folder files become queue jobs (originals consumed after a verified
+# output), and the worker processes them one at a time. It adds its outputs to
+# MEDIA_SCAN_QUEUE, so the single media scan below covers everything from this run.
+QUEUE_RC=0
+printf "${C_BLUE}[3/3] Queueing videos and running the queue worker...${C_RESET}\n"
+if [[ -f "$SCRIPTS_DIR/q.sh" && -f "$SCRIPTS_DIR/worker.sh" ]]; then
+    log "Queueing folder videos, then running worker.sh..."
+    if bash "$SCRIPTS_DIR/q.sh" scan; then
+        bash "$SCRIPTS_DIR/worker.sh" || QUEUE_RC=1
+    else
+        QUEUE_RC=1
+        log "ERROR: queue unavailable; no files were queued, moved or deleted"
+        printf "${C_RED}[ERROR] The queue is not working, so videos were NOT processed (no file was touched).${C_RESET}\n" >&2
+    fi
 else
-    printf "${C_YELLOW}[!] Warning: %s/normalize.sh not found.${C_RESET}\n" "$SCRIPTS_DIR"
-    log "WARNING: normalize.sh not found"
+    printf "${C_YELLOW}[!] q.sh/worker.sh missing; using the old direct mode.${C_RESET}\n"
+    log "WARNING: q.sh/worker.sh missing, falling back to normalize.sh"
+    bash "$SCRIPTS_DIR/normalize.sh"
 fi
 
 scan_queue "$MEDIA_SCAN_QUEUE"
@@ -196,3 +177,4 @@ rm -f "$MEDIA_SCAN_QUEUE"
 trim_log
 log "════════════ Session Finished ════════════"
 printf "${C_BOLD}==================================================${C_RESET}\n\n"
+exit "${QUEUE_RC:-0}"

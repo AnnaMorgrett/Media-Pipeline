@@ -2,264 +2,220 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Android%20%7C%20Linux%20%7C%20Windows%20%7C%20macOS-brightgreen.svg)](#-storage--folder-architecture)
-[![Bash](https://img.shields.io/badge/Language-Bash%20%7C%20Python%20%7C%20PowerShell-4EAA25.svg)](download.sh)
+[![Bash](https://img.shields.io/badge/Language-Bash%20%7C%20PowerShell-4EAA25.svg)](download.sh)
 [![FFmpeg](https://img.shields.io/badge/Powered%20By-FFmpeg%20%26%20yt--dlp-FF0000.svg)](https://ffmpeg.org/)
-[![Web UI](https://img.shields.io/badge/Web%20UI-Mobile%20Friendly-informational.svg)](#-mobile-friendly-web-ui)
 
-An automated, cross-platform media ingestion and audio normalization pipeline. Built natively for **Android (Termux)** in internal shared storage (`/storage/emulated/0/Termux/`) and fully compatible with **Windows (PowerShell / CMD)** and **Linux / macOS**.
+An automated media ingestion and audio normalization pipeline with a persistent job queue. Built for **Android (Termux)**, also works on **Linux / macOS** and **Windows (PowerShell)**.
 
 ---
 
 ## 📌 Key Highlights
 
-- **Linear Loudness Normalization (-9 LUFS):** Pure constant linear gain hitting **-9 LUFS** with **strictly zero dynamic range compression (DRC)**. Retains full musical dynamics, transient punch, and relative volume differences without any audible pumping or limiter breathing.
-- **Safe True-Peak Protection:** Automatically parses inter-sample true-peak measurements (`input_tp`) and safely caps linear gain to prevent digital clipping (`MAX_TRUE_PEAK = -0.5 dBTP`) while strictly maintaining constant linear scaling.
-- **Persistent FIFO Background Queue:** Accepts multiple URLs and local files, executes jobs sequentially in the background, prevents duplicates, records errors, and automatically resumes pending/interrupted jobs after reboot or task kill.
-- **Mobile-Friendly Web UI:** Sleek, responsive web dashboard with dark-mode glassmorphism for queue tracking, one-tap batch processing, live log streaming, visual configuration editing, and one-click Git updates.
-- **Android Share Integration:** Share any video link (TikTok, YouTube, Reels, etc.) or local video file directly to *Termux* from Android's native Share sheet to queue and normalize automatically.
-- **Android Quick Settings Tile:** Access pipeline status and trigger normalization with one tap directly from your Android notification shade.
-- **Automated Non-Video Asset Relocation:** Automatically detects image, sticker, and animation assets (`.jpg`, `.png`, `.gif`, `.webp`, `.heic`, `.svg`), relocates them safely to an asset library with collision prevention, and syncs them to Android's native MediaStore.
-- **Codec-Aware Stream Optimization:** Bitstream copies compatible H.264/HEVC/MPEG-4 streams (`-c:v copy`) to eliminate generational quality loss and maximize processing speed.
-- **Fail-Safe Ingestion:** Downloads and processed videos are verified for container validity, audio streams, and non-zero duration via `ffprobe` before the original raw file is deleted.
-- **Safe Git Updates:** Update scripts seamlessly without overwriting user configuration (`config.env`), persistent queue state (`queue.json`), or custom local changes.
+- **Constant-gain audio normalization (no compression):** one fixed gain for the whole file, no dynamic range compression, no pumping. Default mode `peak` puts the audio peak at -0.1 dB (`PEAK_PERCENT=100`). The older loudness mode (`NORM_MODE=lufs`, target -9 LUFS) is still available.
+- **Parallel and fast:** `WORKERS` (default 2) processes several videos at the same time, and `FAST=1` cuts the peak-matching test encodes.
+- **Persistent queue:** every link or file becomes one job file in `data/queue`. First in, first out, no duplicates, and jobs resume after an interruption.
+- **Web UI:** a small local page (127.0.0.1) for the queue, status, logs and settings.
+- **Share to Termux:** share a video link or a video file from any Android app straight into the queue.
+- **Codec-aware:** compatible video streams are copied (`-c:v copy`), so there is no quality loss.
+- **Fail-safe:** the output is verified with `ffprobe` (and an audio decode check) before the original is deleted.
+- **Non-video cleanup:** images, stickers and GIFs are moved to an assets folder.
+- **Rolling log:** capped at 2 MB.
 
 ---
 
-## 🏗️ Architecture & Pipeline Flow
+## 🏗️ Pipeline Flow
 
 ```mermaid
 flowchart TD
-    A["Trigger Input<br>(Share Intent / Web UI / CLI 'dl' or 'queue')"] --> Q["Persistent FIFO Queue<br>(queue.json - Deduplicated & Resumable)"]
-    Q --> W["queue_worker.sh<br>(Background Worker Daemon)"]
-    W --> B["master_run.sh<br>(Acquire Lock & Trim Log)"]
-    B --> C["Silent yt-dlp Auto-Update"]
-    C --> D["move_assets.sh"]
-    
-    subgraph Assets ["Asset Relocation Pass"]
-        D --> D1{"Is File Non-Video?<br>(.jpg, .png, .webp, .gif)"}
-        D1 -- Yes --> D2["Safe Move to Pictures/TikTok_Assets"]
-        D2 --> D3["Trigger Android MediaScanner"]
-    end
-    
-    D1 -- No / Video --> E["normalize.sh"]
-    
-    subgraph Video ["Video & Audio Processing Pass"]
-        E --> E1["Sanitize Output Filename"]
-        E1 --> E2{"Audio Stream Present?"}
-        E2 -- Yes --> E3["Pass 1: Measure Integrated Loudness (LUFS) & True-Peak"]
-        E3 --> E4["Calculate Linear Gain: (-9 LUFS) - Measured<br>Cap at True-Peak Limit (-0.5 dBTP)"]
-        E4 --> E5["Pass 2: Render with volume=${gain}dB + AAC 192k (Zero DRC)"]
-        E2 -- No --> E6["Remux Video Stream (+faststart)"]
-        E5 --> E7{"Verify Output with ffprobe?"}
-        E6 --> E7
-        E7 -- Success --> E8["Move to Movies/NormalizedVideo"]
-        E8 --> E9["Trigger Android MediaScanner"]
-        E9 --> E10["Delete Raw Source File"]
-        E7 -- Failure --> E11["Preserve Original Source"]
-    end
-    
-    E10 --> F["Job Complete (Release Lock & Notify)"]
-    E11 --> F
+    A["dl URL / tiktok / Share / Web UI"] --> Q["Queue (data/queue, one file per job)"]
+    Q --> W["worker.sh (WORKERS jobs at a time)"]
+    W --> D{"URL or file?"}
+    D -- URL --> Y["yt-dlp download"]
+    D -- File --> N
+    Y --> N["normalize.sh: constant gain + verify"]
+    N -- OK --> O["Movies/NormalizedVideo + media scan"]
+    O --> R["Original removed after verified output"]
+    N -- Failed --> K["Original kept, job marked failed (q retry)"]
 ```
 
 ---
 
-## ⚡ 1-Click Installation
+## ⚡ Installation
 
-### Option A: Mobile (Android Termux)
-Run this single command inside your Termux terminal:
+### Android (Termux) — fresh phone
+
+1. Install **Termux** (from F-Droid or the Termux GitHub releases).
+2. Paste this **one command** in Termux and press Enter:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/AnnaMorgrett/Termux/main/install.sh | bash
+termux-setup-storage; pkg update -y && pkg install -y git curl && until [ -w /storage/emulated/0 ]; do sleep 2; done && { [ -d /storage/emulated/0/Termux/.git ] || git clone https://github.com/AnnaMorgrett/Media-Pipeline.git /storage/emulated/0/Termux; } && bash /storage/emulated/0/Termux/install.sh
 ```
-*Stores all scripts and user configuration in `/storage/emulated/0/Termux/` and registers global commands (`dl`, `tiktok`, `queue`, `webui`).*
 
-### Option B: Windows (PowerShell)
-Clone the repository and run the PowerShell installer:
+The storage popup appears first. Tap **Allow** while the packages install in the background. The installer adds `curl`, `ffmpeg`, `python`, `yt-dlp` and `termux-api`, all with `-y`. If something fails, it prints the failed step. Run the same command again to continue (it is safe to re-run).
+
+3. Close Termux completely and open it again, then check:
+
+```bash
+q selftest
+```
+
+You should see `SELFTEST PASS`.
+
+4. **Recommended:** also install the **Termux:API** app (same source as Termux). Without it, new files may not appear in the Gallery right away.
+
+> If git says `detected dubious ownership`, run:
+> `git config --global --add safe.directory /storage/emulated/0/Termux`
+
+### Windows (PowerShell)
 
 ```powershell
-git clone https://github.com/AnnaMorgrett/Termux.git
-cd Termux
+git clone https://github.com/AnnaMorgrett/Media-Pipeline.git
+cd Media-Pipeline
 .\install.ps1
 ```
-*Creates native `dl.cmd`, `tiktok.cmd`, `queue.cmd`, and `webui.cmd` commands directly inside your Windows PATH.*
 
-### Option C: Linux / macOS / Git Bash
-Clone the repository and run the setup script:
+Creates `dl.cmd` and `tiktok.cmd` in your PATH.
+
+### Linux / macOS / Git Bash
 
 ```bash
-git clone https://github.com/AnnaMorgrett/Termux.git
-cd Termux
+git clone https://github.com/AnnaMorgrett/Media-Pipeline.git
+cd Media-Pipeline
 bash install.sh
 ```
 
----
-
-## 🚀 Unified CLI Usage
-
-The identical commands work across **Android, Windows PowerShell, and Linux**:
-
-| Command | Description | Example |
-| :--- | :--- | :--- |
-| **`dl <URL>`** | Download URL via `yt-dlp` and immediately normalize to -9 LUFS | `dl "https://www.tiktok.com/@user/video/123"` |
-| **`tiktok`** | Batch process all pending media in input directories | `tiktok` |
-| **`queue add <U...>`** | Enqueue single/multiple URLs or files into persistent background queue | `queue add "https://youtu.be/..."` |
-| **`queue list`** | Inspect pending, processing, completed, and failed jobs | `queue list pending` |
-| **`queue status`** | Display queue counts and background worker state | `queue status` |
-| **`queue retry-all`**| Reset all failed jobs back to pending | `queue retry-all` |
-| **`webui open`** | Launch the mobile Web UI in your default browser | `webui open` |
-| **`webui start`** | Start Web UI background daemon (default port `8080`) | `webui start` |
+Needs `ffmpeg`, `ffprobe`, `python3` and `yt-dlp` in your PATH.
 
 ---
 
-## 🌐 Mobile-Friendly Web UI
+## 🚀 Usage
 
-Launch the web dashboard at any time by running:
+| Command | What it does |
+| :--- | :--- |
+| `dl "URL"` | Queue one link, wait for it, and save the normalized video. Extra yt-dlp options can follow the URL. |
+| `tiktok` | Move assets, queue every video in the input folders, and run the whole queue. |
+| `q add URL_OR_FILE...` | Add links or local video files to the queue and process in the background. |
+| `q list` / `q stats` | Show jobs (`pending`, `running`, `done`, `failed`) / counts and worker state. |
+| `q retry [ID\|all]` | Retry failed jobs. |
+| `q stop` | Stop after the current job. |
+| `q logs [N]` | Show the last N log lines. |
+| `q ui open` | Start the Web UI and open it (also `q ui start\|stop\|status`). |
+| `q percent [0-100]` | Show or set the audio peak target. `0` = -9.0 dB, `100` = -0.1 dB. |
+| `q selftest` | Safe check that the queue works on this storage. |
+
+Run `q` with no arguments to see the full list.
+
+### Share from Android
+
+After install, share a video link (or a video file) to **Termux** from any app. It goes into the queue and is processed in the background. The handlers are `~/bin/termux-url-opener` and `~/bin/termux-file-editor`.
+
+### Quick Settings tile (optional, needs Tasker)
+
+`bash /storage/emulated/0/Termux/tasker_setup.sh` prepares Termux for Tasker and prints the remaining steps. Undo any time with `bash tasker_setup.sh --undo`.
+
+---
+
+## 🔄 Updating
+
 ```bash
-webui open
+git -C /storage/emulated/0/Termux pull --ff-only
 ```
-Or start it in the background:
+
 ```bash
-webui start
+bash /storage/emulated/0/Termux/shortcuts.sh
 ```
-*Accessible on your device at `http://127.0.0.1:8080` or across your local network via `http://<phone-ip>:8080`.*
 
-### Web UI Features:
-- **Live Status & Metrics:** Displays worker state (Idle / Processing / Paused), active job progress, pending counts, and device storage.
-- **Batch Add & Paste:** Textarea supporting multiple URLs or file paths with one-tap clipboard paste.
-- **Queue Manager:** Detailed job cards with status tags, timestamps, error descriptions, and retry/delete actions.
-- **Audio & Tuning Controls:** Visual sliders for `TARGET_LUFS` (-9 LUFS default), `MAX_TRUE_PEAK` (-0.5 dBTP), and AAC bitrate.
-- **Live Logs:** Real-time tailing of `media_processor_log.txt` with search filtering and auto-scroll.
-- **Safe Git Updates:** Check and pull the latest commits without losing `config.env` or local modifications.
-
----
-
-## 📱 Android Share Integration
-
-You can queue videos directly from any Android app without opening Termux:
-1. In TikTok, YouTube, Instagram, Facebook, or your browser, tap **Share** -> **Termux**.
-2. Termux automatically runs `termux-url-opener`, adds the link to the persistent FIFO queue, displays a toast notification, and starts the background worker.
-3. **Sharing Local Videos:** You can also share video files from your Gallery or Files app to Termux (`termux-file-editor`), which automatically imports and normalizes them.
-
----
-
-## 🔔 Android Quick Settings Tile Setup
-
-Access the media normalizer instantly from your Android pull-down notification shade:
-
-### Option 1: Built-in Notification Shade Controller
-Runs out of the box using Termux:API. Open the Web UI and tap **Pin Notification Shade Tile**, or run:
-```bash
-bash /storage/emulated/0/Termux/notification_tile.sh show
-```
-*Places a persistent control tile in your notification shade with **⚡ Normalize**, **🌐 Web UI**, and **⏯️ Worker** action buttons.*
-
-### Option 2: Native Quick Settings Tile (MacroDroid / Tasker)
-To add a native grid tile to your Android pull-down shade:
-1. Open **MacroDroid** (or Tasker) and tap **Add Macro**.
-2. **Trigger:** Quick Settings Tile (choose an available slot, name it *"Normalize Media"*).
-3. **Action:** Applications -> Termux:Tasker (or Intent) -> choose:
-   ```bash
-   ~/.termux/tasker/media_normalize.sh
-   ```
-4. Pull down your Android notification shade, tap the edit (pencil) icon, and drag your new tile into the active panel.
-
-### Option 3: Termux:Widget
-Place the pre-configured shortcut on your home screen or widget launcher:
-`~/.shortcuts/tasks/media_normalize.sh`
+The second command refreshes the `dl`, `tiktok` and `q` commands. Your `data/` folder (queue) is not tracked by git, so updates do not touch it.
 
 ---
 
 ## 📁 Storage & Folder Architecture
 
-The pipeline detects your operating system automatically and preserves your media directories:
-
 | Component | Android (Termux) | PC (Windows / Linux / macOS) |
 | :--- | :--- | :--- |
-| **Scripts & Config** | `/storage/emulated/0/Termux/` | Cloned `Termux/` repository directory |
-| **User Configuration**| `/storage/emulated/0/Termux/config.env` | `Termux/config.env` |
-| **Queue State** | `/storage/emulated/0/Termux/queue.json` | `Termux/queue.json` |
-| **Global CLI Binaries** | `$PREFIX/bin/` (`dl`, `tiktok`, `queue`, `webui`) | `WindowsApps/` (`*.cmd`) or `~/.local/bin/` |
-| **TikTok Input** | `/storage/emulated/0/DCIM/TikTok/` | `~/TermuxMedia/DCIM/TikTok/` |
-| **yt-dlp Ingest Queue** | `/storage/emulated/0/Download/yt-dlp/` | `~/TermuxMedia/Download/yt-dlp/` |
-| **Relocated Assets** | `/storage/emulated/0/Pictures/TikTok_Assets/` | `~/TermuxMedia/Pictures/TikTok_Assets/` |
-| **Final Videos** | `/storage/emulated/0/Movies/NormalizedVideo/` | `~/TermuxMedia/Movies/NormalizedVideo/` |
-| **Central Debug Log** | `/storage/emulated/0/Termux/media_processor_log.txt` | `Termux/media_processor_log.txt` |
+| **Scripts** | `/storage/emulated/0/Termux/` | The cloned `Media-Pipeline/` folder |
+| **Commands** | `$PREFIX/bin/` (`dl`, `tiktok`, `q`) | `WindowsApps/` or `~/.local/bin/` |
+| **Queue data** | `/storage/emulated/0/Termux/data/queue/` | `<repo>/data/queue/` |
+| **TikTok input** | `/storage/emulated/0/DCIM/TikTok/` | `~/TermuxMedia/DCIM/TikTok/` |
+| **yt-dlp input** | `/storage/emulated/0/Download/yt-dlp/` | `~/TermuxMedia/Download/yt-dlp/` |
+| **Relocated assets** | `/storage/emulated/0/Pictures/TikTok_Assets/` | `~/TermuxMedia/Pictures/TikTok_Assets/` |
+| **Final videos** | `/storage/emulated/0/Movies/NormalizedVideo/` | `~/TermuxMedia/Movies/NormalizedVideo/` |
+| **Log** | `/storage/emulated/0/Termux/media_processor_log.txt` | `<repo>/media_processor_log.txt` |
+
+Override the root media folder with `MEDIA_DIR`:
+
+- **Bash:** `export MEDIA_DIR="/path/to/custom/media"`
+- **PowerShell:** `$env:MEDIA_DIR = "D:\CustomMedia"`
 
 ---
 
-## 🎧 Audio Normalization Methodology
+## 🎧 Audio Normalization
 
-Standard normalization tools use single-pass compressors and limiters that cause audible pumping, alter dynamic balance, and squash audio transients.
+Compressors and limiters make quiet sounds louder but cause pumping and squash transients. This pipeline only applies **one constant gain** to the whole audio stream.
 
-This pipeline employs an **EBU R128 / ITU-R BS.1770 two-pass constant linear gain workflow**:
+- **`NORM_MODE=peak` (default):** measure the audio peak, then apply the gain that puts the peak at the target. Target = `-9 + 8.9 × PEAK_PERCENT / 100` dB. Default `PEAK_PERCENT=100` gives -0.1 dB.
+- **`NORM_MODE=lufs`:** measure integrated loudness (EBU R128 / ITU-R BS.1770), then apply `TARGET_LUFS - measured` dB. The gain is capped so true peaks stay below `TRUE_PEAK_CEILING`.
 
-1. **Pass 1 (Measurement):**
-   ```bash
-   ffmpeg -i input.mp4 -af loudnorm=print_format=json -f null /dev/null
-   ```
-   Extracts integrated loudness (`input_i`) and true peak (`input_tp`) across the entire file.
+Output audio is AAC (`AUDIO_BITRATE`, default 192k).
 
-2. **Linear Gain Calculation & True-Peak Protection:**
-   $$\text{Raw Gain (dB)} = \text{TARGET\_LUFS} - \text{Measured\_LUFS}$$
-   $$\text{Max Allowed Gain (dB)} = \text{MAX\_TRUE\_PEAK} - \text{Measured\_TP}$$
-   $$\text{Linear Gain} = \min(\text{Raw Gain}, \text{Max Allowed Gain})$$
-   *If applying raw gain would cause peaks to exceed `-0.5 dBTP`, gain is capped to prevent inter-sample distortion while retaining pure linear scaling (strictly zero DRC).*
+**Speed vs accuracy (`peak` mode):** AAC cannot land exactly on a peak, so the script makes test encodes (up to 24 per video) until the real peak is within `PEAK_TOLERANCE` below the target. The default 0.05 dB is very strict and can be slow. For faster runs use `FAST=1`; the peak still never goes above the target.
 
-3. **Pass 2 (Constant Linear Scaling):**
-   ```bash
-   ffmpeg -i input.mp4 -af "volume=${gain}dB" -c:a aac -b:a 192k output.mp4
-   ```
-   Adjusts the entire audio stream by a fixed coefficient, hitting **-9 LUFS** while keeping 100% of the original dynamic punch intact.
+```bash
+FAST=1 WORKERS=3 tiktok
+```
+
+You can also set `FAST` and `WORKERS` in the Web UI settings (`q ui open`) so they stay for every run.
 
 ---
 
-## ⚙️ Configuration & User Tuning (`config.env`)
+## ⚙️ Environment Variables
 
-User configuration is stored in `config.env` and is **never overwritten by Git updates**:
+Change behavior without editing scripts (for example `PEAK_PERCENT=80 tiktok`):
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `TARGET_LUFS` | `-9` | Target integrated loudness in LUFS (pure constant linear gain) |
-| `MAX_TRUE_PEAK` | `-0.5` | True-peak ceiling in dBTP to prevent clipping without compression |
-| `AUDIO_BITRATE` | `192k` | Audio bitrate for normalized AAC stream |
-| `LOG_MAX_BYTES` | `2097152` | Maximum size of `media_processor_log.txt` before 50% rotation (2 MB) |
-| `MEDIA_DIR` | Auto | Overrides root media folder (Android: `/storage/emulated/0`) |
-| `WEB_UI_PORT` | `8080` | Port for the mobile Web UI |
-| `WEB_UI_HOST` | `0.0.0.0`| Network interface for the Web UI (`0.0.0.0` allows LAN access) |
-| `AUTO_UPDATE_YTDLP` | `true` | Automatically checks for yt-dlp updates during pipeline runs |
+| `NORM_MODE` | `peak` | `peak` or `lufs` |
+| `PEAK_PERCENT` | `100` | 0-100, target peak for `peak` mode (0 = -9.0 dB, 100 = -0.1 dB) |
+| `TARGET_LUFS` | `-9` | Target loudness for `lufs` mode |
+| `TRUE_PEAK_CEILING` | `-1.0` | Max true peak (dBTP) after gain, `lufs` mode |
+| `WORKERS` | `2` | Videos processed at the same time (1-4). Use 1 on a weak or hot phone |
+| `FAST` | `0` | `1` = accept a peak up to 0.3 dB below target (fallback 0.6) instead of 0.05 dB: fewer test encodes, much faster. The peak never goes above the target |
+| `PEAK_TOLERANCE` | `0.05` (`0.30` with FAST) | How far BELOW the target the peak may land (never above). Bigger = faster, see below |
+| `PEAK_FALLBACK_TOLERANCE` | `0.30` (`0.60` with FAST) | Wider limit accepted (flagged APPROXIMATE) when AAC cannot hit the strict window. `0` = refuse instead |
+| `VERIFY_DECODE` | `1` | `1` = also decode the output audio once as a check |
+| `AUDIO_BITRATE` | `192k` | AAC bitrate |
+| `LOG_MAX_BYTES` | `2097152` | Log size limit before the oldest half is dropped |
+| `MEDIA_DIR` | auto | Root media folder |
 
 ---
 
-## 🔄 Updating from Git
+## 🧪 Tests
 
-To update to the latest improvements without losing your custom configuration or local modifications, run:
+Needs `ffmpeg` and `python3`. Tests only use a temp folder.
+
 ```bash
-bash /storage/emulated/0/Termux/update.sh
+for t in tests/s1a_test.sh tests/s1b_test.sh tests/s1c_test.sh tests/s1d_lock_test.sh tests/s3_test.sh tests/s5_peak_test.sh tests/s6_parallel_test.sh; do bash "$t" | tail -1; done
+python3 tests/s2_test.py | tail -1
 ```
-Or click **Pull Updates from Git** in the Web UI.
 
 ---
 
 ## 🧩 Script Breakdown
 
-- **[`download.sh`](download.sh)**: Dedicated `yt-dlp` download logic with sane output naming and timestamp flags.
-- **[`move_assets.sh`](move_assets.sh)**: Non-video asset scanner and relocator with collision handling and MediaScanner broadcast.
-- **[`normalize.sh`](normalize.sh)**: Video codec inspector, audio loudness calculator, linear gain renderer (-9 LUFS), true-peak limiter ceiling, and integrity verifier.
-- **[`master_run.sh`](master_run.sh)**: Orchestration controller managing single-instance locks, log rotation, dependency updates, and sequential execution.
-- **[`queue_manager.py`](queue_manager.py)**: Persistent FIFO queue engine with deduplication, atomic state saves, and safe recovery.
-- **[`queue_worker.py`](queue_worker.py)**: Background worker daemon executing queued downloads and normalization.
-- **[`queue_worker.sh`](queue_worker.sh)**: Shell service controller for the background worker (`start`, `stop`, `status`).
-- **[`webui.py`](webui.py)**: High-performance, lightweight Python Web server & REST API.
-- **[`webui.sh`](webui.sh)**: Daemon wrapper to start, stop, or open the mobile Web UI.
-- **[`share_handler.sh`](share_handler.sh)**: Android Share intent handler for URLs and video files.
-- **[`notification_tile.sh`](notification_tile.sh)**: Ongoing notification shade controller with interactive action buttons.
-- **[`update.sh`](update.sh)**: Safe Git updater preserving user configuration.
-- **[`install.sh`](install.sh)**: Automated installer for Android Termux and Linux/macOS.
-- **[`install.ps1`](install.ps1)**: Automated installer for Windows PowerShell.
+- **`install.sh` / `install.ps1`**: installers (Termux and Linux/macOS / Windows).
+- **`shortcuts.sh`**: creates `dl`, `tiktok`, `q`, the share handlers and the Tasker scripts. Safe to re-run.
+- **`q.sh` + `qctl.py`**: the `q` command and the queue engine.
+- **`worker.sh`**: runs queued jobs in order, `WORKERS` at a time.
+- **`master_run.sh`**: the `tiktok` command: updates yt-dlp, moves assets, queues folder videos, runs the worker.
+- **`download.sh`**: yt-dlp download logic.
+- **`normalize.sh`**: codec check, gain calculation, render and verification.
+- **`move_assets.sh`**: moves non-video files to the assets folder.
+- **`scan_lib.sh`**: Android media scan helper. **`config_lib.sh`**: safe config loader.
+- **`webui.py` + `webui.html`**: the Web UI (Python standard library only).
+- **`share_handler.sh`**, **`tasker_setup.sh`**: Android Share and Tasker support.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the [MIT License](LICENSE).
+MIT. See [LICENSE](LICENSE).

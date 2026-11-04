@@ -4,20 +4,13 @@
 *.lock.dir/
 *.tmp
 *.tmp.mp4
-media_processor_log.txt
-media_processor_log.txt.tmp
 
 # Download fragments and partially downloaded media
 *.part
 *.ytdl
 
-# Local user configuration and runtime state (preserved across git updates)
-config.env
+# Local testing and environment overrides
 .env
-queue.json
-queue_state.json
-*.pid
-.webui.pid
 local_test/
 
 # OS-specific files
@@ -29,3 +22,11 @@ Desktop.ini
 __pycache__/
 *.py[cod]
 *$py.class
+data/
+config.env
+media_processor_log.txt
+
+# build/test leftovers
+.backup/
+__pycache__/
+*.pyc

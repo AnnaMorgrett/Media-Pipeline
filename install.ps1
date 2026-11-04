@@ -92,47 +92,13 @@ if not exist "%BASH_BIN%" (
 "@
     Set-Content -LiteralPath "$targetBinDir\tiktok.cmd" -Value $tiktokCmdContent -Encoding ASCII
 
-    # queue.cmd wrapper
-    $queueCmdContent = @"
-@echo off
-setlocal
-set "BASH_BIN=$bashExe"
-if not exist "%BASH_BIN%" (
-    for /f "delims=" %%i in ('where bash 2^>nul') do set "BASH_BIN=%%i"
-)
-if not exist "%BASH_BIN%" (
-    echo [ERROR] Git Bash was not found. Please install Git for Windows.
-    exit /b 1
-)
-"%BASH_BIN%" -c "export PATH=\"/c/Users/AVS/AppData/Local/Programs/Python/Python314/Lib/site-packages/static_ffmpeg/bin/win32:/c/Users/AVS/AppData/Local/Programs/Python/Python314/Scripts:`$HOME/.local/bin:`$PATH\"; queue %*"
-"@
-    Set-Content -LiteralPath "$targetBinDir\queue.cmd" -Value $queueCmdContent -Encoding ASCII
-
-    # webui.cmd wrapper
-    $webuiCmdContent = @"
-@echo off
-setlocal
-set "BASH_BIN=$bashExe"
-if not exist "%BASH_BIN%" (
-    for /f "delims=" %%i in ('where bash 2^>nul') do set "BASH_BIN=%%i"
-)
-if not exist "%BASH_BIN%" (
-    echo [ERROR] Git Bash was not found. Please install Git for Windows.
-    exit /b 1
-)
-"%BASH_BIN%" -c "export PATH=\"/c/Users/AVS/AppData/Local/Programs/Python/Python314/Lib/site-packages/static_ffmpeg/bin/win32:/c/Users/AVS/AppData/Local/Programs/Python/Python314/Scripts:`$HOME/.local/bin:`$PATH\"; webui %*"
-"@
-    Set-Content -LiteralPath "$targetBinDir\webui.cmd" -Value $webuiCmdContent -Encoding ASCII
-
-    Write-Host "[✓] Successfully registered commands: 'dl', 'tiktok', 'queue', and 'webui'" -ForegroundColor Green
+    Write-Host "[✓] Successfully registered commands: 'dl' and 'tiktok'" -ForegroundColor Green
 }
 
 Write-Host ""
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host "  Setup Complete! You can now run in PowerShell:" -ForegroundColor Cyan
-Write-Host "    dl <URL>     - Download and normalize media" -ForegroundColor Yellow
-Write-Host "    tiktok       - Batch process pending media" -ForegroundColor Yellow
-Write-Host "    queue add    - Enqueue jobs into FIFO background queue" -ForegroundColor Yellow
-Write-Host "    webui open   - Launch mobile Web UI in browser" -ForegroundColor Yellow
+Write-Host "    dl <URL>" -ForegroundColor Yellow
+Write-Host "    tiktok" -ForegroundColor Yellow
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host ""

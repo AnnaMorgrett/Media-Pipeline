@@ -4,7 +4,7 @@
 #  @brief       Dedicated media ingestion wrapper powered by yt-dlp.
 #  @author      Anna Morgrett (https://github.com/AnnaMorgrett/Termux)
 #  @license     MIT
-#  @version     2.1.0
+#  @version     2.2.0
 # ═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -19,15 +19,6 @@ else
 fi
 
 # ── Environment & Path Discovery ──────────────────────────────────────────────
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.env"
-if [[ -f "$CONFIG_FILE" ]]; then
-    set -a
-    # shellcheck source=/dev/null
-    source "$CONFIG_FILE"
-    set +a
-fi
-
 if [[ -d "/data/data/com.termux" || -n "${TERMUX_VERSION:-}" ]]; then
     SD="${MEDIA_DIR:-/storage/emulated/0}"
 else
@@ -77,12 +68,23 @@ shift
 printf "${C_BLUE}[*] Ingesting media via yt-dlp:${C_RESET} %s\n" "$url"
 printf "${C_BLUE}[*] Destination folder:${C_RESET} %s\n" "$DL_DIR"
 
+# DL_RESULT_FILE (set by worker.sh): yt-dlp appends the final path of every file here.
+result_args=()
+[[ -n "${DL_RESULT_FILE:-}" ]] && result_args=(--print-to-file "after_move:filepath" "$DL_RESULT_FILE")
+
+# Run as a tracked child so a TERM to this script stops yt-dlp at once.
+YT_PID=""
+trap '[[ -n "$YT_PID" ]] && kill "$YT_PID" 2>/dev/null; exit 143' INT TERM HUP
 yt-dlp \
     --no-mtime \
     -S "vcodec:h264,res,acodec:m4a" \
     -P "$DL_DIR" \
-    -o "%(title)s.%(ext)s" \
+    -o "%(title).100B [%(id)s].%(ext)s" \
+    "${result_args[@]}" \
     "$@" \
-    "$url"
+    "$url" &
+YT_PID=$!
+wait "$YT_PID"
+YT_PID=""
 
 printf "${C_GREEN}[✓] Download finished successfully.${C_RESET}\n"

@@ -109,13 +109,19 @@ ui_cmd() {
 }
 
 fennec_fetch() {
-    local limit="${1:-15}" py_bin
+    local mode="tsv" limit="15" py_bin
+    if [[ "${1:-}" == "--json" ]]; then
+        mode="json"
+        shift
+    fi
+    limit="${1:-15}"
     py_bin="$(command -v "$PY" 2>/dev/null || echo "/data/data/com.termux/files/usr/bin/python3")"
-    su -mm -c "'$py_bin' - '$limit'" <<'PYEOF'
-import glob, os, re, sqlite3, sys
-from urllib.parse import urlparse
+    su -mm -c "'$py_bin' - '$mode' '$limit'" <<'PYEOF'
+import glob, json, os, re, sqlite3, sys
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-limit = int(sys.argv[1])
+mode = sys.argv[1]
+limit = int(sys.argv[2])
 bases = glob.glob("/data/data/*fennec*")
 if not bases:
     sys.exit("Fennec data directory not found")
@@ -147,7 +153,31 @@ else:
 dom_re = re.compile(r"^(www\.|m\.|vm\.|vt\.|mobile\.)?(tiktok\.com|facebook\.com|fb\.watch|instagram\.com|x\.com|twitter\.com|youtu\.be|youtube\.com)$", re.I)
 noise_re = re.compile(r"^/(login|logout|signup|reg|recover|checkpoint|onboarding|accounts/login|i/flow|i/jf|save-device|privacy|policies|help|settings|notifications|messages|explore|search|home|profile|photo\.php)(/|$)", re.I)
 
+STRIP_EXACT = {
+    "__tn__", "fbclid", "mibextid", "rdid", "share_url",
+    "hoisted_section_header_type", "notif_id", "notif_t",
+    "ref", "ref_src", "ref_url", "paipv", "eav",
+    "si", "is", "pp", "feature",
+    "igsh", "igshid",
+    "_r", "_t", "is_from_webapp", "sender_device", "sender_web_id",
+    "refer", "enter_from", "enter_method",
+}
+
+def clean_url(pu):
+    host = pu.netloc.lower()
+    kept = []
+    for k, v in parse_qsl(pu.query, keep_blank_values=True):
+        kl = k.lower()
+        if kl in STRIP_EXACT or kl.startswith("utm_") or kl.startswith("__cft__"):
+            continue
+        if host.endswith(("x.com", "twitter.com")) and kl in ("s", "t"):
+            continue
+        kept.append((k, v))
+    clean_q = urlencode(kept, doseq=True)
+    return urlunparse((pu.scheme, pu.netloc, pu.path, pu.params, clean_q, ""))
+
 seen = set()
+results = []
 for u, title in rows:
     try:
         pu = urlparse(u)
@@ -162,18 +192,30 @@ for u, title in rows:
         continue
     if path.rstrip("/") in ("/watch", "/reel", "/reels", "/shorts") and not pu.query:
         continue
-    if u in seen:
+    cu = clean_url(pu)
+    if cu in seen:
         continue
-    seen.add(u)
-    t = (title or "").replace("\t", " ").replace("\n", " ").strip()[:55]
-    print(f"{u}\t{t}")
-    if len(seen) >= limit:
+    seen.add(cu)
+    t = (title or "").replace("\t", " ").replace("\n", " ").strip()[:80]
+    results.append({"url": cu, "title": t})
+    if len(results) >= limit:
         break
+
+if mode == "json":
+    print(json.dumps(results, ensure_ascii=False))
+else:
+    for r in results:
+        print(f"{r['url']}\t{r['title'][:55]}")
 PYEOF
 }
 
 fennec_cmd() {
     local sub="${1:-list}"
+    if [[ "$sub" == "--json" ]]; then
+        shift
+        fennec_fetch --json "${1:-25}"
+        return
+    fi
     if [[ "$sub" =~ ^[0-9]+$ ]]; then
         sub="list"
     else

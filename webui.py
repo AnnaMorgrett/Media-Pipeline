@@ -251,6 +251,16 @@ class H(BaseHTTPRequestHandler):
                                    "help": {k: v[2] for k, v in SCHEMA.items()},
                                    "choices": {k: list(v[3]) for k, v in SCHEMA.items() if v[1] == "enum"},
                                    "custom": sorted(vals)})
+        if u.path == "/api/fennec":
+            n = max(1, min(int(q.get("limit", ["25"])[0] or 25), 50))
+            rc, out = run(["bash", os.path.join(HERE, "q.sh"), "fennec", "--json", str(n)], timeout=20)
+            if rc != 0:
+                return self.send(500, {"error": out or "Failed to read Fennec history"})
+            try:
+                items = json.loads(out or "[]")
+            except ValueError:
+                return self.send(500, {"error": "Invalid Fennec output"})
+            return self.send(200, {"items": items}, extra=extra)
         self.send(404, {"error": "not found"})
 
     def do_POST(self):

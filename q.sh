@@ -14,10 +14,11 @@ qctl() { "$PY" "$SCRIPT_DIR/qctl.py" "$@"; }
 
 usage() { cat <<'U'
 q add [--consume] <url|file>...  queue links or local video files, process in background
-q dl <url> [yt-dlp opts] queue one link and wait for it (this is what `dl` does)
+q dl [--wait] <url> [yt-dlp opts] queue a link; background by default (--wait blocks)
 q scan                  queue videos found in the TikTok / yt-dlp folders
 q run                   run the worker now (foreground)
 q bg                    start the worker in the background
+q update [--force]      update yt-dlp to the configured channel
 q stop                  stop after the current job
 q list [status]         pending | running | done | failed
 q stats                 counts + worker state
@@ -61,7 +62,7 @@ add_one() {
 
 scan_folders() {
     local dir f age queued=0 dup=0 out
-    for dir in "$SD/DCIM/TikTok" "$SD/Download/yt-dlp"; do
+    for dir in "$SD/DCIM/TikTok" "$SD/Pictures/TikTok" "$SD/Download/yt-dlp"; do
         [[ -d "$dir" ]] || continue
         while IFS= read -r -d '' f <&3; do
             age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
@@ -114,10 +115,28 @@ case "$cmd" in
         [[ "${Q_NO_BG:-}" == "1" ]] || start_bg
         exit $bad ;;
     dl)
-        [[ $# -ge 1 ]] || { echo "Usage: dl <URL> [extra yt-dlp options...]" >&2; exit 1; }
+        wait_mode=0
+        if [[ "${1:-}" == "--wait" ]]; then wait_mode=1; shift; fi
+        [[ $# -ge 1 ]] || { echo "Usage: dl [--wait] <URL> [extra yt-dlp options...]" >&2; exit 1; }
         url="$1"; shift; extra=(); for o in "$@"; do extra+=("--arg=$o"); done
         add_one "$url" "${extra[@]}"; [[ $ADD_RC == 2 ]] && exit 2
-        exec bash "$SCRIPT_DIR/worker.sh" ;;
+        if (( wait_mode )); then
+            exec bash "$SCRIPT_DIR/worker.sh"
+        fi
+        start_bg
+        if (( ADD_RC == 3 )); then
+            echo "Duplicate detected; no new download was queued. Check 'q list' for the existing job."
+        else
+            echo "Download queued. Processing continues in the background; use 'q list' or 'q ui open' to monitor."
+        fi
+        ;;
+    update)
+        case "${1:-}" in
+            "") ;;
+            --force) export YT_DLP_FORCE_UPDATE=1 ;;
+            *) echo "Usage: q update [--force]" >&2; exit 2 ;;
+        esac
+        bash "$SCRIPT_DIR/update_yt_dlp.sh" ;;
     scan)  scan_folders ;;
     run)   exec bash "$SCRIPT_DIR/worker.sh" ;;
     bg)    start_bg ;;

@@ -45,6 +45,7 @@ fi
 
 readonly INPUT_DIRS=(
     "$SD/DCIM/TikTok"
+    "$SD/Pictures/TikTok"
     "$SD/Download/yt-dlp"
 )
 readonly VIDEO_OUT="$SD/Movies/NormalizedVideo"
@@ -113,6 +114,7 @@ The original is deleted only after the output is verified and saved.
 
 Without --file it scans:
   - $SD/DCIM/TikTok
+  - $SD/Pictures/TikTok
   - $SD/Download/yt-dlp
 Target Directory:
   - $VIDEO_OUT
@@ -218,9 +220,15 @@ redownload_h264() {
     log "  REDOWNLOAD: $url"
     # H.264 first, HEVC as fallback; never the watermarked "download" format.
     # Two attempts: TikTok's JS challenge occasionally fails once and works again.
+    local cache_dir="${XDG_CACHE_HOME:-${HOME:-/data/data/com.termux/files/home}/.cache}/media-pipeline"
+    local cookie_file="${YT_DLP_COOKIES:-$cache_dir/cookies.txt}"
+    [[ -x "$_NORM_DIR/sync_cookies.sh" ]] && bash "$_NORM_DIR/sync_cookies.sh" >/dev/null 2>&1 || true
+    local -a cookie_args=()
+    [[ -s "$cookie_file" ]] && cookie_args=(--cookies "$cookie_file")
+
     local attempt
     for attempt in 1 2; do
-        yt-dlp --no-mtime -S "vcodec:h264,res,acodec:m4a" \
+        yt-dlp --no-mtime "${cookie_args[@]}" -S "vcodec:h264,res,acodec:m4a" \
                -f "b[vcodec^=h264][format_id!=download]/b[vcodec~='^(h265|hevc)'][format_id!=download]" \
                -o "$tmpd/%(id)s.%(ext)s" "$url" </dev/null > "$tmpd/yt.log" 2>&1
         cat "$tmpd/yt.log" >> "$LOG" 2>/dev/null

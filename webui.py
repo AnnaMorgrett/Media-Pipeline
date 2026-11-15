@@ -34,6 +34,7 @@ SCHEMA = {
     "AUDIO_BITRATE":     ("192k", "br",   "AAC bitrate when the audio is re-encoded.", (64, 320)),
     "FAST":              ("0",    "enum", "Faster peak matching: accept a peak up to 0.3 dB below the target (never above). 1 = fast, 0 = strict (0.05 dB).", ("0", "1")),
     "WORKERS":           ("2",    "enum", "How many videos are processed at the same time (1-4). More = faster, uses more CPU and battery.", ("1", "2", "3", "4")),
+    "YT_DLP_CHANNEL":     ("master", "enum", "yt-dlp update channel: master = newest canary (more regressions), nightly = recommended development snapshots, stable = monthly stable releases.", ("master", "nightly", "stable")),
     "FFMPEG_LOGLEVEL":   ("info", "enum", "How much ffmpeg writes to the log.", ("quiet", "error", "warning", "info", "verbose")),
 }
 

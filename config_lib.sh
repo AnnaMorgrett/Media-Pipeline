@@ -3,7 +3,7 @@
 # load_config FILE: reads KEY=VALUE lines for a fixed list of keys. The file is NEVER
 # executed; values may only contain letters, digits and . _ - ; real environment
 # variables always win over the file. Missing file = defaults.
-CONFIG_KEYS="NORM_MODE PEAK_PERCENT PEAK_TOLERANCE PEAK_FALLBACK_TOLERANCE TARGET_LUFS TRUE_PEAK_CEILING VERIFY_DECODE AUDIO_BITRATE FFMPEG_LOGLEVEL FAST WORKERS"
+CONFIG_KEYS="NORM_MODE PEAK_PERCENT PEAK_TOLERANCE PEAK_FALLBACK_TOLERANCE TARGET_LUFS TRUE_PEAK_CEILING VERIFY_DECODE AUDIO_BITRATE FFMPEG_LOGLEVEL FAST WORKERS YT_DLP_CHANNEL"
 load_config() {
     local f="$1" line k v
     [[ -f "$f" ]] || return 0

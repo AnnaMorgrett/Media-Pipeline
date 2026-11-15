@@ -28,6 +28,7 @@ fi
 
 readonly INPUT_DIRS=(
     "$SD/DCIM/TikTok"
+    "$SD/Pictures/TikTok"
     "$SD/Download/yt-dlp"
 )
 readonly ASSET_OUT="$SD/Pictures/TikTok_Assets"
@@ -44,6 +45,7 @@ Android's native MediaScanner.
 
 Scanned Directories:
   - $SD/DCIM/TikTok
+  - $SD/Pictures/TikTok
   - $SD/Download/yt-dlp
 
 Target Directory:

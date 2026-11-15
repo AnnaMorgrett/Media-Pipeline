@@ -40,6 +40,12 @@ fi
 
 readonly LOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/media_processor_log.txt"
 readonly LOG_MAX="${LOG_MAX_BYTES:-$(( 2 * 1024 * 1024 ))}"  # 2 MB default
+# Load user settings before selecting the yt-dlp update channel.
+if [[ -f "$SCRIPTS_DIR/config_lib.sh" ]]; then
+    # shellcheck source=config_lib.sh
+    source "$SCRIPTS_DIR/config_lib.sh"
+    load_config "${PIPELINE_CONFIG:-$SCRIPTS_DIR/data/config.conf}"
+fi
 
 # ── Usage & Help ──────────────────────────────────────────────────────────────
 show_help() {
@@ -124,16 +130,18 @@ for bin in ffmpeg ffprobe awk; do
     fi
 done
 
-# ── 3. Silent Dependency Update (yt-dlp) ───────────────────────────────────────
-printf "${C_BLUE}[1/3] Checking yt-dlp dependencies...${C_RESET}\n"
-log "Checking yt-dlp updates..."
-if command -v yt-dlp &>/dev/null; then
-    { yt-dlp -U 2>&1 || pip install --upgrade yt-dlp 2>&1 || python3 -m pip install --upgrade yt-dlp 2>&1 || python -m pip install --upgrade yt-dlp 2>&1 || true; } >> "$LOG"
+# ── 3. Update yt-dlp on its configured release channel ───────────────────────
+printf "${C_BLUE}[1/3] Checking yt-dlp (%s channel)...${C_RESET}\n" "${YT_DLP_CHANNEL:-master}"
+log "Checking yt-dlp update channel: ${YT_DLP_CHANNEL:-master}"
+if [[ -f "$SCRIPTS_DIR/update_yt_dlp.sh" ]]; then
+    if ! bash "$SCRIPTS_DIR/update_yt_dlp.sh" >> "$LOG" 2>&1; then
+        printf "${C_YELLOW}[!] yt-dlp update failed; continuing with the installed version. See the log.\n${C_RESET}"
+        log "WARNING: yt-dlp update failed; using installed version"
+    fi
 else
-    { pip install yt-dlp 2>&1 || python3 -m pip install yt-dlp 2>&1 || python -m pip install yt-dlp 2>&1 || true; } >> "$LOG"
+    printf "${C_YELLOW}[!] Updater not found: %s/update_yt_dlp.sh; skipping automatic yt-dlp update.\n${C_RESET}" "$SCRIPTS_DIR"
+    log "WARNING: updater not found at $SCRIPTS_DIR/update_yt_dlp.sh"
 fi
-log "yt-dlp update routine finished."
-printf "${C_GREEN}[✓] yt-dlp is up to date.${C_RESET}\n"
 
 # ── Shared media-scan queue (scripts queue paths, scanned once at the end) ───
 export MEDIA_SCAN_QUEUE="$(mktemp)"

@@ -78,7 +78,7 @@ on_signal() {
         qctl requeue "${SLOT[$p]}" >/dev/null 2>&1; log "Interrupted; job ${SLOT[$p]} put back in the queue"
     done
     (( SCAN_OWN )) && { scan_queue "$SCANQ"; rm -f "$SCANQ"; }
-    rm -f "$QUEUE_DIR"/.out.* "$QUEUE_DIR/.cnt.$$" 2>/dev/null
+    rm -f "$QUEUE_DIR"/.out.* "$QUEUE_DIR"/.dl.* "$QUEUE_DIR/.cnt.$$" 2>/dev/null
     wake_off; release_lock; exit 143
 }
 trap on_signal INT TERM HUP
@@ -110,17 +110,45 @@ process_job() {   # process_job ID TYPE KEEP VALUE ARGS -> 0 = done, 1 = failed 
         (( rc == 0 )) && { JOB_OUT="$JOB_OUT"; return 0; }
         JOB_ERR="$(explain "$rc")"; return 1
     fi
-    # url
-    local resf; resf=$(mktemp "$QUEUE_DIR/.res.XXXXXX")
-    DL_RESULT_FILE="$resf" run_child bash "$SCRIPT_DIR/download.sh" "$value" "${dlargs[@]}"; rc=$?
-    if (( rc != 0 )); then rm -f "$resf"; JOB_ERR="download failed (exit $rc)"; return 1; fi
+    # url (with up to 2 automatic retries on transient errors)
+    local resf dl_log dl_err attempt=1
+    while :; do
+        resf=$(mktemp "$QUEUE_DIR/.res.XXXXXX")
+        dl_log=$(mktemp "$QUEUE_DIR/.dl.XXXXXX")
+        DL_RESULT_FILE="$resf" run_child bash "$SCRIPT_DIR/download.sh" "$value" "${dlargs[@]}" >"$dl_log" 2>&1; rc=$?
+        if [[ -s "$dl_log" ]]; then
+            cat "$dl_log"
+            sed "s/^/[$(date '+%F %T')] [DOWNLOAD] /" "$dl_log" >> "$LOG"
+        fi
+        if (( rc == 0 )); then
+            rm -f "$dl_log"
+            break
+        fi
+        dl_err=$(grep -E '^ERROR:' "$dl_log" | tail -n 1 | sed 's/^ERROR:[[:space:]]*//')
+        [[ -z "$dl_err" ]] && dl_err=$(grep -E '^\[.*\] error:' "$dl_log" | tail -n 1)
+        rm -f "$resf" "$dl_log"
+        JOB_ERR="${dl_err:-download failed (exit $rc)}"
+        if (( attempt < 3 )) && [[ "$JOB_ERR" =~ (HTTP\ Error\ 429|Too\ Many\ Requests|Connection\ reset|timed\ out|Temporary\ failure|RemoteDisconnected|TLS|SSL|Solving\ JS\ challenge) ]]; then
+            log "Job $id transient failure (attempt $attempt/3): $JOB_ERR — retrying in $((attempt * 5))s"
+            sleep $((attempt * 5))
+            (( ++attempt ))
+            continue
+        fi
+        return 1
+    done
     while IFS= read -r p; do [[ -n "$p" ]] && paths+=("$p"); done < "$resf"
     rm -f "$resf"
     (( ${#paths[@]} > 0 )) || { JOB_ERR="download reported no file"; return 1; }
     for p in "${paths[@]}"; do
         [[ -f "$p" ]] || { errs+="missing: $(basename "$p"); "; continue; }
-        normalize_one "$p" 0; rc=$?
-        if (( rc == 0 )); then outs+="${JOB_OUT};"; (( ++n )); else errs+="$(basename "$p"): $(explain "$rc"); "; fi
+        if [[ "${p,,}" =~ \.(jpg|jpeg|png|webp|gif|bmp|avif|heic)$ ]]; then
+            printf '%s\n' "$p" >> "$SCANQ"
+            outs+="${p};"
+            (( ++n ))
+        else
+            normalize_one "$p" 0; rc=$?
+            if (( rc == 0 )); then outs+="${JOB_OUT};"; (( ++n )); else errs+="$(basename "$p"): $(explain "$rc"); "; fi
+        fi
     done
     JOB_OUT="$outs"
     [[ -z "$errs" ]] && return 0

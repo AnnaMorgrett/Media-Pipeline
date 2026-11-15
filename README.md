@@ -12,7 +12,9 @@ An automated media ingestion and audio normalization pipeline with a persistent 
 ## 📌 Key Highlights
 
 - **Constant-gain audio normalization (no compression):** one fixed gain for the whole file, no dynamic range compression, no pumping. Default mode `peak` puts the audio peak at -0.1 dB (`PEAK_PERCENT=100`). The older loudness mode (`NORM_MODE=lufs`, target -9 LUFS) is still available.
+- **Background-first downloads:** `dl URL` queues immediately and returns; the worker downloads/processes in the background. `dl --wait URL` is available when synchronous completion is needed.
 - **Parallel and fast:** `WORKERS` (default 2) processes several videos at the same time, and `FAST=1` cuts the peak-matching test encodes.
+- **Fresh yt-dlp:** defaults to the upstream `master` Canary channel; choose `nightly` or `stable` in Web UI Settings.
 - **Persistent queue:** every link or file becomes one job file in `data/queue`. First in, first out, no duplicates, and jobs resume after an interruption.
 - **Web UI:** a small local page (127.0.0.1) for the queue, status, logs and settings.
 - **Share to Termux:** share a video link or a video file from any Android app straight into the queue.
@@ -92,11 +94,13 @@ Needs `ffmpeg`, `ffprobe`, `python3` and `yt-dlp` in your PATH.
 
 | Command | What it does |
 | :--- | :--- |
-| `dl "URL"` | Queue one link, wait for it, and save the normalized video. Extra yt-dlp options can follow the URL. |
+| `dl "URL"` | Queue immediately and return; download/normalization continue in the background. Extra yt-dlp options can follow the URL. |
+| `dl --wait "URL"` | Queue one link and keep this terminal attached until the worker drains the queue. |
 | `tiktok` | Move assets, queue every video in the input folders, and run the whole queue. |
 | `q add URL_OR_FILE...` | Add links or local video files to the queue and process in the background. |
 | `q list` / `q stats` | Show jobs (`pending`, `running`, `done`, `failed`) / counts and worker state. |
 | `q retry [ID\|all]` | Retry failed jobs. |
+| `q update [--force]` | Update yt-dlp using the selected channel. `--force` bypasses the 6-hour update check interval. |
 | `q stop` | Stop after the current job. |
 | `q logs [N]` | Show the last N log lines. |
 | `q ui open` | Start the Web UI and open it (also `q ui start\|stop\|status`). |
@@ -179,6 +183,7 @@ Change behavior without editing scripts (for example `PEAK_PERCENT=80 tiktok`):
 | `TARGET_LUFS` | `-9` | Target loudness for `lufs` mode |
 | `TRUE_PEAK_CEILING` | `-1.0` | Max true peak (dBTP) after gain, `lufs` mode |
 | `WORKERS` | `2` | Videos processed at the same time (1-4). Use 1 on a weak or hot phone |
+| `YT_DLP_CHANNEL` | `master` | `master` (Canary), `nightly`, or `stable` update channel. |
 | `FAST` | `0` | `1` = accept a peak up to 0.3 dB below target (fallback 0.6) instead of 0.05 dB: fewer test encodes, much faster. The peak never goes above the target |
 | `PEAK_TOLERANCE` | `0.05` (`0.30` with FAST) | How far BELOW the target the peak may land (never above). Bigger = faster, see below |
 | `PEAK_FALLBACK_TOLERANCE` | `0.30` (`0.60` with FAST) | Wider limit accepted (flagged APPROXIMATE) when AAC cannot hit the strict window. `0` = refuse instead |
@@ -206,7 +211,8 @@ python3 tests/s2_test.py | tail -1
 - **`shortcuts.sh`**: creates `dl`, `tiktok`, `q`, the share handlers and the Tasker scripts. Safe to re-run.
 - **`q.sh` + `qctl.py`**: the `q` command and the queue engine.
 - **`worker.sh`**: runs queued jobs in order, `WORKERS` at a time.
-- **`master_run.sh`**: the `tiktok` command: updates yt-dlp, moves assets, queues folder videos, runs the worker.
+- **`master_run.sh`**: the `tiktok` command: checks the configured yt-dlp channel, moves assets, queues folder videos, runs the worker.
+- **`update_yt_dlp.sh`**: installs/updates the selected yt-dlp release channel with a 6-hour check interval.
 - **`download.sh`**: yt-dlp download logic.
 - **`normalize.sh`**: codec check, gain calculation, render and verification.
 - **`move_assets.sh`**: moves non-video files to the assets folder.

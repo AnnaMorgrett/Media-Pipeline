@@ -81,9 +81,11 @@ fi
 if [[ -z "$BIN" || "$IS_SCRIPT" == "1" || $update_rc -ne 0 ]]; then
     case "$CHANNEL" in
         master)
-            # Upstream's bleeding-edge/canary source build.
-            "$PY" -m pip install --upgrade hatchling wheel || exit $?
-            "$PY" -m pip install --no-cache-dir --upgrade --force-reinstall \
+            # Upstream's bleeding-edge/canary source build (avoid recompiling C deps).
+            "$PY" -c 'import hatchling, wheel' 2>/dev/null || "$PY" -m pip install hatchling wheel || exit $?
+            "$PY" -m pip install --no-cache-dir --force-reinstall --no-deps \
+                'https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.tar.gz' || exit $?
+            "$PY" -m pip install --upgrade-strategy only-if-needed \
                 'yt-dlp[default] @ https://github.com/yt-dlp/yt-dlp/archive/refs/heads/master.tar.gz' || exit $?
             ;;
         nightly)

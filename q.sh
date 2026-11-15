@@ -16,6 +16,8 @@ usage() { cat <<'U'
 q add [--consume] <url|file>...  queue links or local video files, process in background
 q dl [--wait] <url> [yt-dlp opts] queue a link; background by default (--wait blocks)
 q scan                  queue videos found in the TikTok / yt-dlp folders
+q fennec [N]            list recent media links from Fennec history (default 15)
+q fennec add [IDX|all]  queue listed Fennec links (e.g. 1, 1 3, all; default 1)
 q run                   run the worker now (foreground)
 q bg                    start the worker in the background
 q update [--force]      update yt-dlp to the configured channel
@@ -106,6 +108,142 @@ ui_cmd() {
     esac
 }
 
+fennec_fetch() {
+    local limit="${1:-15}" py_bin
+    py_bin="$(command -v "$PY" 2>/dev/null || echo "/data/data/com.termux/files/usr/bin/python3")"
+    su -mm -c "'$py_bin' - '$limit'" <<'PYEOF'
+import glob, os, re, sqlite3, sys
+from urllib.parse import urlparse
+
+limit = int(sys.argv[1])
+bases = glob.glob("/data/data/*fennec*")
+if not bases:
+    sys.exit("Fennec data directory not found")
+
+places = []
+for root, _, files in os.walk(bases[0]):
+    if "places.sqlite" in files:
+        places.append(os.path.join(root, "places.sqlite"))
+if not places:
+    sys.exit("Fennec places.sqlite not found")
+
+src = sqlite3.connect(f"file:{places[0]}?mode=ro", uri=True)
+mem = sqlite3.connect(":memory:")
+src.backup(mem)
+src.close()
+
+tables = {r[0] for r in mem.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+if "moz_historyvisits" in tables:
+    rows = mem.execute("""
+        SELECT p.url, p.title
+        FROM moz_places p
+        JOIN moz_historyvisits v ON v.place_id = p.id
+        ORDER BY v.visit_date DESC
+        LIMIT 500
+    """).fetchall()
+else:
+    rows = mem.execute("SELECT url, title FROM moz_places ORDER BY id DESC LIMIT 500").fetchall()
+
+dom_re = re.compile(r"^(www\.|m\.|vm\.|vt\.|mobile\.)?(tiktok\.com|facebook\.com|fb\.watch|instagram\.com|x\.com|twitter\.com|youtu\.be|youtube\.com)$", re.I)
+noise_re = re.compile(r"^/(login|logout|signup|reg|recover|checkpoint|onboarding|accounts/login|i/flow|i/jf|save-device|privacy|policies|help|settings|notifications|messages|explore|search|home|profile|photo\.php)(/|$)", re.I)
+
+seen = set()
+for u, title in rows:
+    try:
+        pu = urlparse(u)
+    except Exception:
+        continue
+    if pu.scheme not in ("http", "https") or not dom_re.match(pu.netloc):
+        continue
+    path = pu.path or "/"
+    if path == "/" and not pu.query:
+        continue
+    if noise_re.match(path):
+        continue
+    if path.rstrip("/") in ("/watch", "/reel", "/reels", "/shorts") and not pu.query:
+        continue
+    if u in seen:
+        continue
+    seen.add(u)
+    t = (title or "").replace("\t", " ").replace("\n", " ").strip()[:55]
+    print(f"{u}\t{t}")
+    if len(seen) >= limit:
+        break
+PYEOF
+}
+
+fennec_cmd() {
+    local sub="${1:-list}"
+    if [[ "$sub" =~ ^[0-9]+$ ]]; then
+        sub="list"
+    else
+        [[ $# -gt 0 ]] && shift
+    fi
+
+    case "$sub" in
+        list)
+            local limit="${1:-15}" i=0 u t
+            while IFS=$'\t' read -r u t; do
+                [[ -z "$u" ]] && continue
+                (( ++i ))
+                if [[ -n "$t" ]]; then
+                    printf "%2d. %s  # %s\n" "$i" "$u" "$t"
+                else
+                    printf "%2d. %s\n" "$i" "$u"
+                fi
+            done < <(fennec_fetch "$limit")
+            (( i == 0 )) && echo "No recent media URLs found in Fennec history."
+            ;;
+        add)
+            local -a urls=() titles=() picks=()
+            local u t tok
+            while IFS=$'\t' read -r u t; do
+                [[ -z "$u" ]] && continue
+                urls+=("$u")
+                titles+=("$t")
+            done < <(fennec_fetch 30)
+
+            if (( ${#urls[@]} == 0 )); then
+                echo "No recent media URLs found in Fennec history." >&2
+                return 1
+            fi
+
+            if (( $# == 0 )); then
+                picks=(1)
+            else
+                for tok in "$@"; do
+                    if [[ "$tok" == "all" ]]; then
+                        local idx
+                        for (( idx=1; idx<=${#urls[@]}; idx++ )); do picks+=("$idx"); done
+                    else
+                        local part
+                        for part in ${tok//,/ }; do
+                            [[ "$part" =~ ^[0-9]+$ ]] && picks+=("$part")
+                        done
+                    fi
+                done
+            fi
+
+            [[ -x "$SCRIPT_DIR/sync_cookies.sh" ]] && bash "$SCRIPT_DIR/sync_cookies.sh" >/dev/null 2>&1 || true
+
+            local p_idx queued=0
+            for p_idx in "${picks[@]}"; do
+                if (( p_idx < 1 || p_idx > ${#urls[@]} )); then
+                    echo "index out of range (1..${#urls[@]}): $p_idx" >&2
+                    continue
+                fi
+                add_one "${urls[$((p_idx-1))]}"
+                [[ $ADD_RC -eq 0 ]] && (( ++queued ))
+            done
+            (( queued > 0 )) && [[ "${Q_NO_BG:-}" != "1" ]] && start_bg
+            ;;
+        *)
+            echo "Usage: q fennec [N] | q fennec add [1 3|1,3|all]" >&2
+            return 2
+            ;;
+    esac
+}
+
 cmd="${1:-help}"; [[ $# -gt 0 ]] && shift
 case "$cmd" in
     add)
@@ -138,6 +276,7 @@ case "$cmd" in
         esac
         bash "$SCRIPT_DIR/update_yt_dlp.sh" ;;
     scan)  scan_folders ;;
+    fennec) fennec_cmd "$@" ;;
     run)   exec bash "$SCRIPT_DIR/worker.sh" ;;
     bg)    start_bg ;;
     stop)  if worker_running; then mkdir -p "$QUEUE_DIR"; : > "$QUEUE_DIR/.stop"; echo "stop requested (after the current job)"; else echo "no worker running"; fi ;;

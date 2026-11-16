@@ -213,7 +213,7 @@ while :; do   # outer: drain, then re-check once for jobs added meanwhile
             rm -f "$QUEUE_DIR/.stop"; log "Stop requested"; printf "${C_YELLOW}[!] Stopping: finishing the running job(s).${C_RESET}\n"; stopped=1
         fi
         if (( ! stopped && ! drained && ${#SLOT[@]} < WORKERS )); then
-            qerr_f="$TMPW/qctl.err"
+            qerr_f="${CNT}.qctl.err"
             line=$(qctl next --max "$WORKERS" 2>"$qerr_f"); nrc=$?
             if (( nrc == 1 )); then drained=1                                   # queue empty
             elif (( nrc != 0 )); then                                           # queue broken: say so, do not pretend we finished

@@ -240,7 +240,7 @@ while :; do   # outer: drain, then re-check once for jobs added meanwhile
     if [[ "$pend" =~ ^[0-9]+$ ]] && (( pend > 0 )) && acquire_lock; then continue; fi
     break
 done
-rm -f "$CNT"
+rm -f "$CNT" "${CNT}.qctl.err"
 
 trim_log
 log "════════ Worker finished: done=$ok failed=$failed ════════"

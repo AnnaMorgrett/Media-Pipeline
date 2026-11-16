@@ -190,8 +190,12 @@ for u, title in rows:
         continue
     if noise_re.match(path):
         continue
-    if path.rstrip("/") in ("/watch", "/reel", "/reels", "/shorts") and not pu.query:
+    if path.rstrip("/") in ("/watch", "/reel", "/reels", "/shorts", "/photo", "/photos") and not pu.query:
         continue
+    if path.rstrip("/") in ("/photo", "/photos"):
+        qs = dict(parse_qsl(pu.query, keep_blank_values=True))
+        if not qs.get("fbid") and not qs.get("v"):
+            continue
     cu = clean_url(pu)
     if cu in seen:
         continue
@@ -327,7 +331,14 @@ case "$cmd" in
     retry) if [[ "${1:-all}" == "all" ]]; then qctl retry --all; else qctl retry "$1"; fi; [[ $? == 0 ]] && { [[ "${Q_NO_BG:-}" == "1" ]] || start_bg; } ;;
     remove) [[ $# -ge 1 ]] || { usage >&2; exit 2; }; qctl remove "$1" ;;
     clear) case "${1:-done}" in all) qctl clear done failed ;; done|failed) qctl clear "$1" ;; *) usage >&2; exit 2 ;; esac ;;
-    logs)  tail -n "${1:-30}" "$LOG" 2>/dev/null ;;
+    logs)
+        if [[ "${1:-}" == "--errors" || "${1:-}" == "-e" ]]; then
+            shift
+            grep -iE "(error|fail|warn|bvc2|traceback|exception|403|forbidden|cannot parse|gave up)" "$LOG" 2>/dev/null | tail -n "${1:-60}"
+        else
+            tail -n "${1:-30}" "$LOG" 2>/dev/null
+        fi
+        ;;
     ui)    ui_cmd "$@" ;;
     selftest) qctl selftest ;;
     percent)

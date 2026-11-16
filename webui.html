@@ -62,7 +62,7 @@ nav button.sel{color:var(--acc);font-weight:700}
   <div class="row"><button id="bRetryAll">Retry all failed</button><button id="bClearDone" class="danger">Clear done</button><button id="bClearFailed" class="danger">Clear failed</button></div>
 </section>
 <section id="tab-logs" class="hide">
-  <div class="card"><label style="display:flex;gap:10px;align-items:center;margin:0 0 10px;font-weight:400"><input type="checkbox" id="logev" checked style="width:22px;height:22px"> Pipeline events only (hide ffmpeg output)</label><div class="row" style="margin-bottom:8px"><select id="lognum"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select><button id="bLogRefresh">Refresh</button></div><pre id="logbox">Loading…</pre></div>
+  <div class="card"><label style="display:flex;gap:10px;align-items:center;margin:0 0 8px;font-weight:400"><input type="checkbox" id="logev" checked style="width:22px;height:22px"> Pipeline events only (hide ffmpeg output)</label><label style="display:flex;gap:10px;align-items:center;margin:0 0 10px;font-weight:400"><input type="checkbox" id="logerr" style="width:22px;height:22px"> Warnings &amp; errors only</label><div class="row" style="margin-bottom:8px"><select id="lognum"><option>100</option><option selected>200</option><option>500</option><option>1000</option></select><button id="bLogRefresh">Refresh</button></div><pre id="logbox">Loading…</pre></div>
 </section>
 <section id="tab-settings" class="hide">
   <div class="card"><h2>Audio &amp; checks</h2><div id="cfg"></div>
@@ -120,7 +120,7 @@ async function pJobs(){[...$("chips").children].forEach(b=>b.classList.toggle("s
     if(x.status!=="running"){const b=el("button","danger","Remove");b.onclick=()=>act(async()=>{await api("/api/remove",{id:x.id});poll()});r.appendChild(b)}
     if(r.children.length)d.appendChild(r);box.appendChild(d)})}
 
-async function pLogs(){const j=await api("/api/logs?n="+$("lognum").value+($("logev").checked?"&events=1":""));const p=$("logbox");const atEnd=p.scrollTop+p.clientHeight>=p.scrollHeight-40;
+async function pLogs(){const j=await api("/api/logs?n="+$("lognum").value+($("logev").checked?"&events=1":"")+($("logerr").checked?"&errors=1":""));const p=$("logbox");const atEnd=p.scrollTop+p.clientHeight>=p.scrollHeight-40;
   p.textContent=j.lines.length?j.lines.join("\n"):"(log is empty)";if(atEnd)p.scrollTop=p.scrollHeight}
 
 async function loadCfg(){const c=await api("/api/config");const box=$("cfg");box.textContent="";
@@ -163,7 +163,7 @@ $("bAdd").onclick=()=>act(async()=>{const t=$("addbox").value;if(!t.trim()){toas
 $("bRetryAll").onclick=()=>act(async()=>{await api("/api/retry",{all:true});toast("Failed jobs queued again");poll()});
 $("bClearDone").onclick=()=>act(async()=>{if(confirm("Remove all finished jobs from the list?")){await api("/api/clear",{statuses:["done"]});poll()}});
 $("bClearFailed").onclick=()=>act(async()=>{if(confirm("Remove all failed jobs from the list?")){await api("/api/clear",{statuses:["failed"]});poll()}});
-$("bFennecRefresh").onclick=()=>act(loadFennec);$("bLogRefresh").onclick=()=>act(pLogs);$("lognum").onchange=()=>act(pLogs);$("logev").onchange=()=>act(pLogs);
+$("bFennecRefresh").onclick=()=>act(loadFennec);$("bLogRefresh").onclick=()=>act(pLogs);$("lognum").onchange=()=>act(pLogs);$("logev").onchange=()=>act(pLogs);$("logerr").onchange=()=>act(pLogs);
 $("bSave").onclick=()=>act(async()=>{await api("/api/config",{values:cfgValues()});await loadCfg();toast("Saved")});
 $("bReset").onclick=()=>act(async()=>{if(confirm("Reset all settings to defaults?")){await api("/api/config",{reset:true});await loadCfg();toast("Defaults restored")}});
 document.addEventListener("visibilitychange",poll);

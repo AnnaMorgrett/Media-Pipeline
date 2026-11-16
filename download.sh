@@ -69,11 +69,21 @@ fi
 if run_ytdlp; then rm -f "$TMP_LOG"; printf "${C_GREEN}[✓] Download finished successfully.${C_RESET}\n"; exit 0; fi
 err_text="$(cat "$TMP_LOG" 2>/dev/null || true)"
 
+IMP_ARGS=()
+if python3 -c 'import curl_cffi' 2>/dev/null; then
+    IMP_ARGS=(--impersonate chrome)
+fi
+
 if [[ ! "$err_text" =~ Unsupported\ URL || "$url" =~ (facebook\.com|fb\.watch|instagram\.com|x\.com|twitter\.com|tiktok\.com) ]]; then
+    if (( ${#IMP_ARGS[@]} )) && [[ "$err_text" =~ (Cannot\ parse\ data|HTTP\ Error\ 403|Forbidden) ]]; then
+        printf "${C_YELLOW}[~] Retrying with browser TLS impersonation...${C_RESET}\n"
+        if run_ytdlp "${IMP_ARGS[@]}"; then rm -f "$TMP_LOG"; printf "${C_GREEN}[✓] Download finished (impersonated).${C_RESET}\n"; exit 0; fi
+        err_text="$(cat "$TMP_LOG" 2>/dev/null || true)"
+    fi
     sync_cookies
     if [[ -s "$COOKIE_FILE" ]]; then
         printf "${C_YELLOW}[~] Retrying with Fennec cookies...${C_RESET}\n"
-        if run_ytdlp --cookies "$COOKIE_FILE"; then rm -f "$TMP_LOG"; printf "${C_GREEN}[✓] Download finished (authenticated).${C_RESET}\n"; exit 0; fi
+        if run_ytdlp "${IMP_ARGS[@]}" --cookies "$COOKIE_FILE"; then rm -f "$TMP_LOG"; printf "${C_GREEN}[✓] Download finished (authenticated).${C_RESET}\n"; exit 0; fi
         err_text="$(cat "$TMP_LOG" 2>/dev/null || true)"
     fi
 fi

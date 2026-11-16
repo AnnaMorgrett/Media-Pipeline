@@ -121,18 +121,23 @@ def jobs(status=None):
 EVENT_RE = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] \[")
 
 
-def tail_log(n, events=False):
-    """Last n lines; events=True keeps only the pipeline's own timestamped lines (hides ffmpeg output)."""
+ERR_RE = re.compile(r"(error|fail|warn|bvc2|traceback|exception|403|forbidden|cannot parse|gave up)", re.I)
+
+
+def tail_log(n, events=False, errors=False):
+    """Last n lines; events=True keeps pipeline lines; errors=True keeps warnings/errors."""
     try:
         with open(LOG, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 400 * 1024))
+            f.seek(max(0, size - (1024 * 1024 if errors else 400 * 1024)))
             data = f.read().decode("utf-8", "replace")
     except OSError:
         return []
     lines = data.splitlines()
-    if events:
+    if errors:
+        lines = [l for l in lines if ERR_RE.search(l)]
+    elif events:
         lines = [l for l in lines if EVENT_RE.match(l)]
     return lines[-n:]
 
@@ -243,7 +248,7 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"jobs": js})
         if u.path == "/api/logs":
             n = max(1, min(int(q.get("n", ["200"])[0] or 200), 1000))
-            return self.send(200, {"lines": tail_log(n, q.get("events", ["0"])[0] == "1")})
+            return self.send(200, {"lines": tail_log(n, q.get("events", ["0"])[0] == "1", q.get("errors", ["0"])[0] == "1")})
         if u.path == "/api/config":
             vals = read_config()
             return self.send(200, {"values": {k: vals.get(k, v[0]) for k, v in SCHEMA.items()},

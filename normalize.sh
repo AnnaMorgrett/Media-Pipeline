@@ -222,12 +222,14 @@ redownload_h264() {
     # Two attempts: TikTok's JS challenge occasionally fails once and works again.
     local cache_dir="${XDG_CACHE_HOME:-${HOME:-/data/data/com.termux/files/home}/.cache}/media-pipeline"
     local cookie_file="${YT_DLP_COOKIES:-$cache_dir/cookies.txt}"
-    [[ -x "$_NORM_DIR/sync_cookies.sh" ]] && bash "$_NORM_DIR/sync_cookies.sh" >/dev/null 2>&1 || true
-    local -a cookie_args=()
-    [[ -s "$cookie_file" ]] && cookie_args=(--cookies "$cookie_file")
 
     local attempt
     for attempt in 1 2; do
+        local -a cookie_args=()
+        if (( attempt == 2 )); then
+            [[ -x "$_NORM_DIR/sync_cookies.sh" ]] && bash "$_NORM_DIR/sync_cookies.sh" >/dev/null 2>&1 || true
+            [[ -s "$cookie_file" ]] && cookie_args=(--cookies "$cookie_file")
+        fi
         yt-dlp --no-mtime "${cookie_args[@]}" -S "vcodec:h264,res,acodec:m4a" \
                -f "b[vcodec^=h264][format_id!=download]/b[vcodec~='^(h265|hevc)'][format_id!=download]" \
                -o "$tmpd/%(id)s.%(ext)s" "$url" </dev/null > "$tmpd/yt.log" 2>&1

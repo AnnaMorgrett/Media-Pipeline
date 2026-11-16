@@ -213,10 +213,12 @@ while :; do   # outer: drain, then re-check once for jobs added meanwhile
             rm -f "$QUEUE_DIR/.stop"; log "Stop requested"; printf "${C_YELLOW}[!] Stopping: finishing the running job(s).${C_RESET}\n"; stopped=1
         fi
         if (( ! stopped && ! drained && ${#SLOT[@]} < WORKERS )); then
-            line=$(qctl next --max "$WORKERS" 2>&1); nrc=$?
+            qerr_f="$TMPW/qctl.err"
+            line=$(qctl next --max "$WORKERS" 2>"$qerr_f"); nrc=$?
             if (( nrc == 1 )); then drained=1                                   # queue empty
             elif (( nrc != 0 )); then                                           # queue broken: say so, do not pretend we finished
-                printf "${C_RED}[ERROR] Queue problem: %s${C_RESET}\n" "$line" >&2; log "ERROR: queue problem: $line"; QUEUE_ERR=1; drained=1
+                qerr=$(cat "$qerr_f" 2>/dev/null || true)
+                printf "${C_RED}[ERROR] Queue problem: %s %s${C_RESET}\n" "$line" "$qerr" >&2; log "ERROR: queue problem: $line $qerr"; QUEUE_ERR=1; drained=1
             else
                 IFS=$'\t' read -r id type keep value jargs <<< "$line"
                 start_slot "$id" "$type" "$keep" "$value" "${jargs:-}"

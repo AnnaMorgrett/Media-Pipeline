@@ -44,7 +44,8 @@ class Locked:
                 pass
             owner = None
             try:
-                owner = int(open(os.path.join(d, "pid")).read().strip())
+                with open(os.path.join(d, "pid"), encoding="utf-8") as pf:
+                    owner = int(pf.read().strip())
             except (OSError, ValueError):
                 pass
             stale = False

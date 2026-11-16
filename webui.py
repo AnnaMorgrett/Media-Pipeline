@@ -136,7 +136,7 @@ def tail_log(n, events=False, errors=False):
         return []
     lines = data.splitlines()
     if errors:
-        lines = [l for l in lines if ERR_RE.search(l)]
+        lines = [l for l in lines if ERR_RE.search(l) and "CALIBRATE #" not in l and "OUTPUT PEAK:" not in l]
     elif events:
         lines = [l for l in lines if EVENT_RE.match(l)]
     return lines[-n:]

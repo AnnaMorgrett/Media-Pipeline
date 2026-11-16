@@ -334,7 +334,7 @@ case "$cmd" in
     logs)
         if [[ "${1:-}" == "--errors" || "${1:-}" == "-e" ]]; then
             shift
-            grep -iE "(error|fail|warn|bvc2|traceback|exception|403|forbidden|cannot parse|gave up)" "$LOG" 2>/dev/null | tail -n "${1:-60}"
+            grep -iE "(error|fail|warn|bvc2|traceback|exception|403|forbidden|cannot parse|gave up)" "$LOG" 2>/dev/null | grep -vE "CALIBRATE #|OUTPUT PEAK:" | tail -n "${1:-60}"
         else
             tail -n "${1:-30}" "$LOG" 2>/dev/null
         fi

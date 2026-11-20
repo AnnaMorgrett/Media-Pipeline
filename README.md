@@ -58,7 +58,7 @@ Paste this command in Termux and tap **Allow** when the storage permission promp
 termux-setup-storage; pkg update -y && pkg install -y git curl && until [ -w /storage/emulated/0 ]; do sleep 2; done && { [ -d /storage/emulated/0/Termux/.git ] || git clone [https://github.com/AnnaMorgrett/Media-Pipeline.git](https://github.com/AnnaMorgrett/Media-Pipeline.git) /storage/emulated/0/Termux; } && bash /storage/emulated/0/Termux/install.sh
 ```
 
-The installer installs `curl`, `ffmpeg`, `python`, `yt-dlp`, and `termux-api` with `-y`. It is idempotent and safe to re-run if interrupted.
+The installer installs `curl`, `ffmpeg`, `python`, `yt-dlp`, and `termux-api` with `-y` (plus `ffmpeg-bvc2` on Android ARM64). It is idempotent and safe to re-run if interrupted.
 
 **Step 3 — Restart Termux and verify the queue**
 Close Termux completely, reopen it, and run:
@@ -85,7 +85,7 @@ If Git reports `detected dubious ownership` on `/storage/emulated/0/Termux`, whi
 git config --global --add safe.directory /storage/emulated/0/Termux
 ```
 
-**Step 6 — Install `ffmpeg-bvc2` for offline ByteVC2 decoding (optional, Android ARM64)**
+**Step 6 — Manual `ffmpeg-bvc2` install (automatic via `install.sh` & `q update`)**
 ```bash
 mkdir -p ~/.local/ffmpeg-bvc2 && curl -fL https://github.com/AnnaMorgrett/ffmpeg-bvc2/releases/latest/download/ffmpeg-bvc2-android-arm64.tar.xz | tar -xJ -C ~/.local/ffmpeg-bvc2 && chmod +x ~/.local/ffmpeg-bvc2/bin/*
 ```
@@ -240,7 +240,7 @@ python3 tests/s2_test.py | tail -1
 - **`sync_cookies.sh`**: extracts Fennec session cookies (`cookies.sqlite`) via `su -mm` SQLite backup on rooted Android, or imports `Download/cookies.txt` when unrooted.
 - **`worker.sh`**: processes queued jobs (`WORKERS` in parallel) with automatic retry backoff for transient network failures.
 - **`master_run.sh`**: the `tiktok` command—updates `yt-dlp`, relocates non-video assets, queues folder videos, and runs the worker.
-- **`update_yt_dlp.sh`**: installs and updates `yt-dlp` on the selected release channel with a 6-hour check interval.
+- **`update_yt_dlp.sh`**: installs and updates `yt-dlp` and `ffmpeg-bvc2` (`latest-arm64`) with a 6-hour check interval.
 - **`download.sh`**: two-tier `yt-dlp` download logic (unauthenticated first, cookie fallback second), `curl_cffi` TLS impersonation, and `gallery-dl` image/carousel routing.
 - **`normalize.sh`**: codec inspection, two-tier ByteVC2 H.264 recovery (`yt-dlp` re-download + local `ffmpeg-bvc2` transcode), constant-gain calibration, render, and verification.
 - **`move_assets.sh`**: relocates non-video media files to the assets directory.

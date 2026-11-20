@@ -45,11 +45,40 @@ fi
 STAMP="$CACHE_DIR/yt-dlp-${CHANNEL}.last-check"
 LOCK="$CACHE_DIR/yt-dlp-update.lock"
 
+update_ffmpeg_bvc2() {
+    [[ "$(uname -m)" == "aarch64" && -d "/data/data/com.termux" ]] || return 0
+    local bstamp="$CACHE_DIR/ffmpeg-bvc2.last-check" bdir="$HOME/.local/ffmpeg-bvc2" bnow blast api info rid url cur tmpd
+    bnow=$(date +%s)
+    if [[ "$FORCE" != "1" && -f "$bstamp" && -x "$bdir/bin/ffmpeg" ]]; then
+        blast=$(cat "$bstamp" 2>/dev/null || echo 0)
+        [[ "$blast" =~ ^[0-9]+$ ]] && (( bnow >= blast && bnow - blast < INTERVAL )) && return 0
+    fi
+    api="https://api.github.com/repos/AnnaMorgrett/ffmpeg-bvc2/releases/tags/latest-arm64"
+    info=$(curl -fsSL --max-time 15 "$api" 2>/dev/null | python3 -c 'import sys,json; d=json.load(sys.stdin); a=[x["browser_download_url"] for x in d.get("assets",[]) if x["name"].endswith(".tar.xz")]; print(d.get("published_at","")+"|"+d.get("body","").strip()); print(a[0] if a else "")' 2>/dev/null) || return 0
+    rid=$(printf '%s\n' "$info" | sed -n '1p')
+    url=$(printf '%s\n' "$info" | sed -n '2p')
+    [[ -n "$rid" && -n "$url" ]] || return 0
+    printf '%s\n' "$bnow" > "$bstamp.tmp" && mv -f "$bstamp.tmp" "$bstamp"
+    cur=$(cat "$bdir/.release-id" 2>/dev/null || true)
+    [[ "$cur" == "$rid" && -x "$bdir/bin/ffmpeg" ]] && return 0
+    echo "Updating ffmpeg-bvc2 ($rid)..."
+    tmpd="${bdir}.new.$$"
+    rm -rf "$tmpd" && mkdir -p "$tmpd"
+    if curl -fsSL --max-time 120 "$url" | tar -xJ -C "$tmpd" && chmod +x "$tmpd/bin/"* && "$tmpd/bin/ffmpeg" -hide_banner -decoders 2>/dev/null | grep -q bvc2; then
+        printf '%s\n' "$rid" > "$tmpd/.release-id"
+        rm -rf "$bdir" && mv "$tmpd" "$bdir"
+        echo "ffmpeg-bvc2 updated ($rid)."
+    else
+        rm -rf "$tmpd"
+    fi
+}
+
 now=$(date +%s)
 if [[ "$FORCE" != "1" && -f "$STAMP" ]]; then
     last=$(cat "$STAMP" 2>/dev/null || echo 0)
     if [[ "$last" =~ ^[0-9]+$ ]] && (( now >= last && now - last < INTERVAL )); then
         echo "yt-dlp $CHANNEL update check skipped (checked $((now - last))s ago; interval ${INTERVAL}s)."
+        update_ffmpeg_bvc2
         exit 0
     fi
 fi
@@ -142,3 +171,4 @@ if [[ -z "$new_version" ]]; then
 fi
 printf '%s\n' "$now" > "$STAMP.tmp" && mv -f "$STAMP.tmp" "$STAMP"
 echo "yt-dlp update complete: $old_version -> $new_version (channel: $CHANNEL)"
+update_ffmpeg_bvc2

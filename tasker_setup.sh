@@ -5,7 +5,9 @@
 # commands in Termux. Undo any time:  bash tasker_setup.sh --undo
 set -eu
 P="${HOME:-/data/data/com.termux/files/home}/.termux/termux.properties"
-mkdir -p "$(dirname "$P")"; touch "$P"
+mkdir -p "$(dirname "$P")"
+touch "$P"
+
 if [[ "${1:-}" == "--undo" ]]; then
     sed -i -E '/^[[:space:]]*allow-external-apps[[:space:]]*=/d' "$P"
     echo "allow-external-apps removed (default: off)"
@@ -13,11 +15,19 @@ elif grep -qE '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true[[:s
     echo "allow-external-apps is already true"
 else
     sed -i -E '/^[[:space:]]*#?[[:space:]]*allow-external-apps[[:space:]]*=/d' "$P"
+    [[ -s "$P" && -n "$(tail -c 1 "$P" 2>/dev/null || true)" ]] && printf '\n' >> "$P"
     printf 'allow-external-apps = true\n' >> "$P"
     echo "allow-external-apps = true written"
 fi
-command -v termux-reload-settings &>/dev/null && termux-reload-settings || echo "(close and reopen Termux so it re-reads the setting)"
-if [[ "${1:-}" != "--undo" ]]; then cat <<'T'
+
+if command -v termux-reload-settings >/dev/null 2>&1; then
+    termux-reload-settings || echo "(close and reopen Termux so it re-reads the setting)"
+else
+    echo "(close and reopen Termux so it re-reads the setting)"
+fi
+
+if [[ "${1:-}" != "--undo" ]]; then
+    cat <<'T'
 
 Next, in the Tasker app (Android needs you to do these taps once):
  1. Grant Tasker the permission "Run commands in Termux environment"

@@ -24,7 +24,7 @@ main{padding:12px 12px calc(84px + env(safe-area-inset-bottom));max-width:720px;
 button,select,input,textarea{font:inherit;color:inherit}
 button{min-height:44px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--card);cursor:pointer}
 button.primary{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
-button.danger{color:var(--bad)}button:disabled{opacity:.5}
+button.danger{color:var(--bad)}button:disabled{opacity:.5;cursor:default}
 .row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}
 textarea,input[type=text],select{width:100%;padding:10px;border-radius:12px;border:1px solid var(--line);background:var(--bg)}
 textarea{min-height:110px;resize:vertical}
@@ -84,35 +84,75 @@ nav button.sel{color:var(--acc);font-weight:700}
 <div id="toast" role="status"></div>
 <script>
 "use strict";
+/**
+ * @typedef {{id:number, value:string, since:number, type:string}} ActiveJob
+ * @typedef {{id:number, status:string, type:string, value:string, attempts?:number, updated?:number, args?:string[], error?:string, output?:string}} QueueJob
+ * @typedef {{url:string, title?:string}} FennecItem
+ * @typedef {{item:string, ok:boolean, msg:string}} AddResult
+ * @typedef {{values:Record<string,string>, defaults:Record<string,string>, help:Record<string,string>, choices:Record<string,string[]>, custom:string[]}} ConfigData
+ */
+
+/** @param {string} id */
 const $=id=>document.getElementById(id);
 const TABS=[["status","Status"],["queue","Queue"],["fennec","Fennec"],["logs","Logs"],["settings","Settings"]];
-let tab="status",filter="",timers=[],cfgLoaded=false,fennecLoaded=false;
+let tab="status",filter="",pollTimer=null,inFlight=false,cfgLoaded=false,fennecLoaded=false,serverNow=0;
+
+/**
+ * @param {string} t
+ * @param {string} [c]
+ * @param {string} [x]
+ */
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!==undefined)e.textContent=x;return e}
-let tt;function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(tt);tt=setTimeout(()=>t.style.display="none",3500)}
+
+let tt;
+/** @param {string} m */
+function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(tt);tt=setTimeout(()=>t.style.display="none",3500)}
+
+/**
+ * @param {string} path
+ * @param {Record<string, unknown>} [body]
+ * @returns {Promise<any>}
+ */
 async function api(path,body){
   const o=body===undefined?{}:{method:"POST",headers:{"Content-Type":"application/json","X-Requested-With":"q-ui"},body:JSON.stringify(body)};
   const r=await fetch(path,o);let j={};try{j=await r.json()}catch(e){}
   if(!r.ok)throw new Error(j.error||("HTTP "+r.status));return j}
+
+/** @param {() => Promise<void>} fn */
 async function act(fn){try{await fn()}catch(e){toast(e.message)}}
+
+/** @param {number} s */
 function ago(s){s=Math.max(0,Math.round(s));if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+"m "+(s%60)+"s";return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"}
 
 function buildNav(){const n=$("nav");TABS.forEach(([k,l])=>{const b=el("button","",l);b.dataset.k=k;b.onclick=()=>show(k);n.appendChild(b)})}
+
+/** @param {string} k */
 function show(k){tab=k;TABS.forEach(([t])=>$("tab-"+t).classList.toggle("hide",t!==k));
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("sel",b.dataset.k===k));
   if(k==="settings"&&!cfgLoaded)act(loadCfg);if(k==="fennec"&&!fennecLoaded)act(loadFennec);poll()}
 
-async function pStatus(){const s=await api("/api/status");
+async function pStatus(){const s=await api("/api/status");serverNow=s.now;
   const g=$("stats");g.textContent="";["pending","running","done","failed"].forEach(k=>{const d=el("div","stat "+k);d.appendChild(el("b","",s.stats[k]));d.appendChild(el("span","",k));g.appendChild(d)});
   const w=$("wpill");w.textContent=s.worker.running?"worker running":"worker idle";w.className="pill "+(s.worker.running?"on":"off");
-  const c=$("current");if(s.current){c.textContent="";c.appendChild(el("div","",s.current.value));c.appendChild(el("div","m mut","job "+s.current.id+" · "+s.current.type+" · running for "+ago(s.now-s.current.since)))}else c.textContent=s.worker.running?"Worker is idle, waiting for jobs.":"Nothing running.";
-  $("bStop").disabled=!s.worker.running;$("bStart").disabled=s.worker.running;
+  const c=$("current");
+  /** @type {ActiveJob[]} */
+  const active=Array.isArray(s.running)?s.running:(s.current?[s.current]:[]);
+  if(active.length){c.textContent="";active.forEach(item=>{const row=el("div","job");row.appendChild(el("div","v",item.value));row.appendChild(el("div","m mut","job #"+item.id+" · "+item.type+" · running for "+ago(s.now-item.since)));c.appendChild(row)})}
+  else c.textContent=s.worker.running?"Worker is idle, waiting for jobs.":"Nothing running.";
+  $("bStop").disabled=!s.worker.running||!!s.worker.stop_requested;
+  $("bStop").textContent=s.worker.stop_requested?"Stopping after current job…":"Stop after current job";
+  $("bStart").disabled=s.worker.running;
   const ch=$("chips");if(!ch.children.length){[["","All"],["pending","Pending"],["running","Running"],["failed","Failed"],["done","Done"]].forEach(([k,l])=>{const b=el("button","chip",l);b.dataset.k=k;b.onclick=()=>{filter=k;pJobs()};ch.appendChild(b)})}
   [...ch.children].forEach(b=>{const k=b.dataset.k;b.textContent=(b.textContent.replace(/ \d+$/,""))+" "+(k===""?s.stats.pending+s.stats.running+s.stats.done+s.stats.failed:s.stats[k])})}
 
 async function pJobs(){[...$("chips").children].forEach(b=>b.classList.toggle("sel",b.dataset.k===filter));
   const j=await api("/api/jobs"+(filter?"?status="+filter:""));const box=$("joblist");box.textContent="";
-  if(!j.jobs.length){box.appendChild(el("span","mut","No jobs here."));return}
-  j.jobs.forEach(x=>{const d=el("div","job");const top=el("div");top.appendChild(el("span","badge "+x.status,x.status));top.appendChild(el("span","m mut","#"+x.id+" · "+x.type+(x.attempts?" · tries "+x.attempts:"")));d.appendChild(top);
+  /** @type {QueueJob[]} */
+  const list=j.jobs||[];
+  if(!list.length){box.appendChild(el("span","mut","No jobs here."));return}
+  list.forEach(x=>{const d=el("div","job");const top=el("div");top.appendChild(el("span","badge "+x.status,x.status));
+    const age=serverNow&&x.updated?" · "+ago(serverNow-x.updated)+" ago":"";
+    top.appendChild(el("span","m mut","#"+x.id+" · "+x.type+(x.attempts?" · tries "+x.attempts:"")+age));d.appendChild(top);
     d.appendChild(el("div","v",x.value));if(x.args&&x.args.length)d.appendChild(el("div","m mut","options: "+x.args.join(" ")));
     if(x.error)d.appendChild(el("div","err",x.error));if(x.output)d.appendChild(el("div","m mut","→ "+x.output.split(";").filter(Boolean).join(", ")));
     const r=el("div","row");
@@ -123,42 +163,62 @@ async function pJobs(){[...$("chips").children].forEach(b=>b.classList.toggle("s
 async function pLogs(){const j=await api("/api/logs?n="+$("lognum").value+($("logev").checked?"&events=1":"")+($("logerr").checked?"&errors=1":""));const p=$("logbox");const atEnd=p.scrollTop+p.clientHeight>=p.scrollHeight-40;
   p.textContent=j.lines.length?j.lines.join("\n"):"(log is empty)";if(atEnd)p.scrollTop=p.scrollHeight}
 
-async function loadCfg(){const c=await api("/api/config");const box=$("cfg");box.textContent="";
+async function loadCfg(){
+  /** @type {ConfigData} */
+  const c=await api("/api/config");
+  const box=$("cfg");box.textContent="";
   Object.keys(c.values).forEach(k=>{box.appendChild(el("label","",k));box.appendChild(el("div","help",c.help[k]+" Default: "+c.defaults[k]+(c.custom.includes(k)?" (changed)":"")));
     let f;if(c.choices[k]){f=el("select");c.choices[k].forEach(o=>{const op=el("option","",o);op.value=o;f.appendChild(op)})}else{f=el("input");f.type="text";f.inputMode=k==="AUDIO_BITRATE"?"text":"decimal"}
     f.id="cfg_"+k;f.value=c.values[k];box.appendChild(f);
     if(k==="PEAK_PERCENT"){const r=el("div","help");r.id="peakdb";box.appendChild(r);const upd=()=>{const p=parseFloat(f.value);r.textContent=(isFinite(p)&&p>=0&&p<=100)?"= target peak "+(-9+8.9*p/100).toFixed(2)+" dB":"enter 0 to 100"};f.oninput=upd;upd()}});cfgLoaded=true}
-function cfgValues(){const v={};document.querySelectorAll("[id^=cfg_]").forEach(f=>v[f.id.slice(4)]=f.value.trim());return v}
+function cfgValues(){/** @type {Record<string, string>} */ const v={};document.querySelectorAll("[id^=cfg_]").forEach(f=>v[f.id.slice(4)]=f.value.trim());return v}
 
 async function loadFennec(){
-  const box=$("fenneclist");box.innerHTML="<span class=\"mut\">Loading Fennec history…</span>";
-  const r=await api("/api/fennec?limit=25");fennecLoaded=true;box.textContent="";
-  if(!r.items||!r.items.length){box.appendChild(el("span","mut","No recent media links found in Fennec."));return}
-  r.items.forEach(x=>{
-    const d=el("div","job");
-    if(x.title)d.appendChild(el("div","",x.title));
-    d.appendChild(el("div","v mut",x.url));
-    const row=el("div","row");
-    const b=el("button","primary","Queue");
-    b.onclick=()=>act(async()=>{
-      b.disabled=true;
-      const res=await api("/api/add",{items:x.url});
-      const ok=res.results&&res.results[0]&&res.results[0].ok;
-      b.textContent=ok?"Queued ✓":"In queue";
-      toast(ok?"Queued & started":(res.results&&res.results[0]?res.results[0].msg:"Already queued"));
-      poll();
+  const box=$("fenneclist");box.textContent="";box.appendChild(el("span","mut","Loading Fennec history…"));
+  try{
+    const r=await api("/api/fennec?limit=25");fennecLoaded=true;box.textContent="";
+    /** @type {FennecItem[]} */
+    const items=r.items||[];
+    if(!items.length){box.appendChild(el("span","mut","No recent media links found in Fennec."));return}
+    items.forEach(x=>{
+      const d=el("div","job");
+      if(x.title)d.appendChild(el("div","",x.title));
+      d.appendChild(el("div","v mut",x.url));
+      const row=el("div","row");
+      const b=el("button","primary","Queue");
+      b.onclick=()=>act(async()=>{
+        b.disabled=true;
+        try{
+          const res=await api("/api/add",{items:x.url});
+          const ok=res.results&&res.results[0]&&res.results[0].ok;
+          b.textContent=ok?"Queued ✓":"In queue";
+          toast(ok?"Queued & started":(res.results&&res.results[0]?res.results[0].msg:"Already queued"));
+          poll();
+        }catch(e){b.disabled=false;throw e}
+      });
+      row.appendChild(b);d.appendChild(row);box.appendChild(d);
     });
-    row.appendChild(b);d.appendChild(row);box.appendChild(d);
-  });
+  }catch(e){
+    box.textContent="";box.appendChild(el("div","err",e.message));throw e;
+  }
 }
-function poll(){if(document.hidden)return;act(async()=>{await pStatus();if(tab==="queue")await pJobs();if(tab==="logs")await pLogs()})}
-function schedule(){timers.forEach(clearInterval);timers=[setInterval(poll,3000)]}
+
+async function poll(){
+  if(document.hidden||inFlight)return;
+  inFlight=true;
+  try{await act(async()=>{await pStatus();if(tab==="queue")await pJobs();if(tab==="logs")await pLogs()})}
+  finally{inFlight=false;schedule()}
+}
+function schedule(){clearTimeout(pollTimer);if(!document.hidden)pollTimer=setTimeout(poll,3000)}
 
 $("bStart").onclick=()=>act(async()=>{await api("/api/worker",{action:"start"});toast("Worker started");setTimeout(poll,600)});
 $("bStop").onclick=()=>act(async()=>{await api("/api/worker",{action:"stop"});toast("Will stop after the current job");poll()});
 $("bAdd").onclick=()=>act(async()=>{const t=$("addbox").value;if(!t.trim()){toast("Paste a link or a file path first");return}
-  const r=await api("/api/add",{items:t});const n=r.results.filter(x=>x.ok).length;$("addres").textContent="";
-  r.results.forEach(x=>{const d=el("div","",(x.ok?"✓ ":"• ")+x.msg+" — "+x.item);d.style.color=x.ok?"var(--ok)":"var(--warn)";$("addres").appendChild(d)});
+  const r=await api("/api/add",{items:t});
+  /** @type {AddResult[]} */
+  const results=r.results||[];
+  const n=results.filter(x=>x.ok).length;$("addres").textContent="";
+  results.forEach(x=>{const d=el("div","",(x.ok?"✓ ":"• ")+x.msg+" — "+x.item);d.style.color=x.ok?"var(--ok)":"var(--warn)";$("addres").appendChild(d)});
   if(n)$("addbox").value="";toast(n?n+" queued":"Nothing new was queued");poll()});
 $("bRetryAll").onclick=()=>act(async()=>{await api("/api/retry",{all:true});toast("Failed jobs queued again");poll()});
 $("bClearDone").onclick=()=>act(async()=>{if(confirm("Remove all finished jobs from the list?")){await api("/api/clear",{statuses:["done"]});poll()}});
@@ -166,8 +226,8 @@ $("bClearFailed").onclick=()=>act(async()=>{if(confirm("Remove all failed jobs f
 $("bFennecRefresh").onclick=()=>act(loadFennec);$("bLogRefresh").onclick=()=>act(pLogs);$("lognum").onchange=()=>act(pLogs);$("logev").onchange=()=>act(pLogs);$("logerr").onchange=()=>act(pLogs);
 $("bSave").onclick=()=>act(async()=>{await api("/api/config",{values:cfgValues()});await loadCfg();toast("Saved")});
 $("bReset").onclick=()=>act(async()=>{if(confirm("Reset all settings to defaults?")){await api("/api/config",{reset:true});await loadCfg();toast("Defaults restored")}});
-document.addEventListener("visibilitychange",poll);
-buildNav();show("status");schedule();
+document.addEventListener("visibilitychange",()=>{if(document.hidden)clearTimeout(pollTimer);else poll()});
+buildNav();show("status");
 </script>
 </body>
 </html>

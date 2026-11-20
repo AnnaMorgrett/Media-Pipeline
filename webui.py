@@ -6,15 +6,23 @@ Safety: listens on 127.0.0.1 only; checks Host/Origin and a custom header on eve
 change (blocks other web pages and DNS-rebinding). To use it from another device set
 WEBUI_HOST=0.0.0.0: then a secret token (data/webui.token) is required.
 """
-import json, os, re, secrets, subprocess, sys, time
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("QUEUE_DIR", os.path.join(HERE, "data", "queue"))
 QUEUE_DIR = os.environ["QUEUE_DIR"]
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import qctl as _qctl   # read-only queue access in-process (no subprocess polling = low CPU/battery)
+sys.path.insert(0, HERE)
+import qctl as _qctl  # read-only queue access in-process (no subprocess polling = low CPU/battery)
+
 DATA_DIR = os.path.dirname(QUEUE_DIR) if os.path.basename(QUEUE_DIR) == "queue" else QUEUE_DIR
 CONFIG = os.environ.get("PIPELINE_CONFIG") or os.path.join(DATA_DIR, "config.conf")
 LOG = os.environ.get("PIPELINE_LOG") or os.path.join(HERE, "media_processor_log.txt")
@@ -26,16 +34,16 @@ MAX_BODY = 64 * 1024
 
 # key -> (default, kind, help, extra)
 SCHEMA = {
-    "NORM_MODE":         ("peak", "enum", "peak = audio peak set by the percentage below (forced on every file). lufs = loudness target.", ("peak", "lufs")),
-    "PEAK_PERCENT":      ("100",  "pct",  "Peak mode: 0 = -9.0 dB, 50 = -4.55 dB, 100 = -0.1 dB (Target dB = -9 + 8.9 x percent/100).", (0.0, 100.0)),
-    "TARGET_LUFS":       ("-9",   "num",  "Target loudness (LUFS). Constant gain only, no compression.", (-40.0, 0.0)),
-    "TRUE_PEAK_CEILING": ("-1.0", "num",  "Highest allowed true peak (dBTP). Gain is reduced to stay under it.", (-20.0, 0.0)),
-    "VERIFY_DECODE":     ("1",    "enum", "Decode the output audio once to check it (1 = yes, 0 = no).", ("0", "1")),
-    "AUDIO_BITRATE":     ("192k", "br",   "AAC bitrate when the audio is re-encoded.", (64, 320)),
-    "FAST":              ("0",    "enum", "Faster peak matching: accept a peak up to 0.3 dB below the target (never above). 1 = fast, 0 = strict (0.05 dB).", ("0", "1")),
-    "WORKERS":           ("2",    "enum", "How many videos are processed at the same time (1-4). More = faster, uses more CPU and battery.", ("1", "2", "3", "4")),
-    "YT_DLP_CHANNEL":     ("master", "enum", "yt-dlp update channel: master = newest canary (more regressions), nightly = recommended development snapshots, stable = monthly stable releases.", ("master", "nightly", "stable")),
-    "FFMPEG_LOGLEVEL":   ("info", "enum", "How much ffmpeg writes to the log.", ("quiet", "error", "warning", "info", "verbose")),
+    "NORM_MODE":         ("peak",   "enum", "peak = audio peak set by the percentage below (forced on every file). lufs = loudness target.", ("peak", "lufs")),
+    "PEAK_PERCENT":      ("100",    "pct",  "Peak mode: 0 = -9.0 dB, 50 = -4.55 dB, 100 = -0.1 dB (Target dB = -9 + 8.9 x percent/100).", (0.0, 100.0)),
+    "TARGET_LUFS":       ("-9",     "num",  "Target loudness (LUFS). Constant gain only, no compression.", (-40.0, 0.0)),
+    "TRUE_PEAK_CEILING": ("-1.0",   "num",  "Highest allowed true peak (dBTP). Gain is reduced to stay under it.", (-20.0, 0.0)),
+    "VERIFY_DECODE":     ("1",      "enum", "Decode the output audio once to check it (1 = yes, 0 = no).", ("0", "1")),
+    "AUDIO_BITRATE":     ("192k",   "br",   "AAC bitrate when the audio is re-encoded.", (64, 320)),
+    "FAST":              ("0",      "enum", "Faster peak matching: accept a peak up to 0.3 dB below the target (never above). 1 = fast, 0 = strict (0.05 dB).", ("0", "1")),
+    "WORKERS":           ("2",      "enum", "How many videos are processed at the same time (1-4). More = faster, uses more CPU and battery.", ("1", "2", "3", "4")),
+    "YT_DLP_CHANNEL":    ("master", "enum", "yt-dlp update channel: master = newest canary (more regressions), nightly = recommended development snapshots, stable = monthly stable releases.", ("master", "nightly", "stable")),
+    "FFMPEG_LOGLEVEL":   ("info",   "enum", "How much ffmpeg writes to the log.", ("quiet", "error", "warning", "info", "verbose")),
 }
 
 
@@ -65,12 +73,12 @@ def validate(key, val):
 def read_config():
     vals = {}
     try:
-        with open(CONFIG) as f:
+        with open(CONFIG, encoding="utf-8") as f:
             for line in f:
-                m = re.fullmatch(r"([A-Z_]+)=([A-Za-z0-9._-]*)\n?", line)
+                m = re.fullmatch(r"([A-Z_]+)=([\"']?)([A-Za-z0-9._-]*)\2\s*", line)
                 if m and m.group(1) in SCHEMA:
                     try:
-                        vals[m.group(1)] = validate(m.group(1), m.group(2))
+                        vals[m.group(1)] = validate(m.group(1), m.group(3))
                     except ValueError:
                         pass
     except FileNotFoundError:
@@ -80,13 +88,14 @@ def read_config():
 
 def write_config(vals):
     os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
-    tmp = CONFIG + ".tmp"
-    with open(tmp, "w") as f:
+    tmp = "%s.%d.tmp" % (CONFIG, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write("# Written by the Web UI. Only these settings are read; edit via the UI or here.\n")
         for k in SCHEMA:
             if k in vals:
                 f.write("%s=%s\n" % (k, vals[k]))
-        f.flush(); os.fsync(f.fileno())
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, CONFIG)
 
 
@@ -94,7 +103,7 @@ def run(args, timeout=60):
     try:
         p = subprocess.run(args, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         return p.returncode, (p.stdout + p.stderr).strip()
-    except Exception as e:  # noqa
+    except Exception as e:  # noqa: BLE001
         return 99, str(e)
 
 
@@ -103,12 +112,15 @@ def qctl(*a):
 
 
 def worker_state():
+    stop_req = os.path.exists(os.path.join(QUEUE_DIR, ".stop"))
     try:
-        pid = int(open(os.path.join(QUEUE_DIR, ".worker.lock", "pid")).read().strip())
-        os.kill(pid, 0)
-        return {"running": True, "pid": pid}
+        with open(os.path.join(QUEUE_DIR, ".worker.lock", "pid"), encoding="utf-8") as f:
+            pid = int(f.read().strip())
+        if _qctl._pid_alive(pid):
+            return {"running": True, "pid": pid, "stop_requested": stop_req}
     except (OSError, ValueError):
-        return {"running": False, "pid": None}
+        pass
+    return {"running": False, "pid": None, "stop_requested": False}
 
 
 def jobs(status=None):
@@ -119,8 +131,6 @@ def jobs(status=None):
 
 
 EVENT_RE = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] \[")
-
-
 ERR_RE = re.compile(r"(error|fail|warn|bvc2|traceback|exception|403|forbidden|cannot parse|gave up)", re.I)
 
 
@@ -145,6 +155,13 @@ def tail_log(n, events=False, errors=False):
 URL_RE = re.compile(r"https?://[^\s<>\"']+")
 
 
+def _clean_url(u):
+    u = u.rstrip(".,;!?")
+    while u.endswith(")") and u.count(")") > u.count("("):
+        u = u[:-1].rstrip(".,;!?")
+    return u
+
+
 def add_items(text):
     results = []
     for line in text.replace("\r", "\n").split("\n"):
@@ -153,7 +170,7 @@ def add_items(text):
             continue
         urls = URL_RE.findall(line)
         if urls:
-            targets = [("--url", u.rstrip(".,;)")) for u in urls]
+            targets = [("--url", _clean_url(u)) for u in urls]
         elif line.startswith("/"):
             targets = [("--file", line)]
         else:
@@ -167,24 +184,36 @@ def add_items(text):
     return results
 
 
+def _parse_int(val, default, lo, hi, name="parameter"):
+    if val is None or val == "":
+        return default
+    try:
+        n = int(val)
+    except (TypeError, ValueError) as e:
+        raise ValueError("invalid %s" % name) from e
+    return max(lo, min(n, hi))
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "qui"
 
-    def log_message(self, *a):   # keep storage I/O low: no per-request logging
+    def log_message(self, *a):
         pass
 
-    # ---- helpers
     def send(self, code, body, ctype="application/json", extra=None):
         if not isinstance(body, bytes):
-            body = (json.dumps(body) if ctype == "application/json" else body).encode()
+            body = (json.dumps(body) if ctype == "application/json" else body).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", ctype + "; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
+        )
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -195,77 +224,119 @@ class H(BaseHTTPRequestHandler):
         if LOOPBACK:
             ok = {"127.0.0.1:%d" % PORT, "localhost:%d" % PORT, "[::1]:%d" % PORT}
             if host not in ok:
-                self.send(403, {"error": "bad host"}); return False
+                self.send(403, {"error": "bad host"})
+                return False
         origin = self.headers.get("Origin")
         if origin and origin.lower() != "http://" + host:
-            self.send(403, {"error": "bad origin"}); return False
+            self.send(403, {"error": "bad origin"})
+            return False
         if post and self.headers.get("X-Requested-With") != "q-ui":
-            self.send(403, {"error": "missing header"}); return False
+            self.send(403, {"error": "missing header"})
+            return False
         if not LOOPBACK:
-            tok = open(os.path.join(DATA_DIR, "webui.token")).read().strip()
-            ck = (self.headers.get("Cookie") or "")
+            try:
+                with open(os.path.join(DATA_DIR, "webui.token"), encoding="utf-8") as f:
+                    tok = f.read().strip()
+            except OSError:
+                self.send(500, {"error": "token unavailable"})
+                return False
             q = parse_qs(urlsplit(self.path).query).get("t", [""])[0]
-            if q == tok:
+            ck = SimpleCookie()
+            try:
+                ck.load(self.headers.get("Cookie") or "")
+            except Exception:  # noqa: BLE001
+                pass
+            ck_val = ck["qt"].value if "qt" in ck else ""
+            if q and secrets.compare_digest(q, tok):
                 self._set_cookie = "qt=%s; HttpOnly; SameSite=Strict; Path=/" % tok
-            elif ("qt=" + tok) not in ck:
-                self.send(401, {"error": "token required"}); return False
+            elif not (ck_val and secrets.compare_digest(ck_val, tok)):
+                self.send(401, {"error": "token required"})
+                return False
         return True
 
     def body_json(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
+        raw_len = self.headers.get("Content-Length") or "0"
+        try:
+            n = int(raw_len)
+        except ValueError as e:
+            raise ValueError("invalid Content-Length") from e
+        if n < 0 or n > MAX_BODY:
             raise ValueError("body too large")
         if "application/json" not in (self.headers.get("Content-Type") or ""):
             raise ValueError("JSON required")
-        return json.loads(self.rfile.read(n) or b"{}")
+        data = json.loads(self.rfile.read(n) or b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("JSON object required")
+        return data
 
-    # ---- routes
     def do_GET(self):
         self._set_cookie = None
         if not self.guard(False):
             return
-        u = urlsplit(self.path); q = parse_qs(u.query)
+        u = urlsplit(self.path)
+        q = parse_qs(u.query)
         extra = {"Set-Cookie": self._set_cookie} if self._set_cookie else None
-        if u.path in ("/", "/index.html"):
-            with open(os.path.join(HERE, "webui.html"), "rb") as f:
-                return self.send(200, f.read(), "text/html", extra)
-        if u.path == "/api/status":
-            js = jobs()
-            st = {s: 0 for s in ("pending", "running", "done", "failed")}
-            for j in js:
-                st[j["status"]] += 1
-            cur = next((j for j in js if j["status"] == "running"), None)
-            return self.send(200, {"stats": st, "worker": worker_state(), "now": time.time(),
-                                   "current": cur and {"id": cur["id"], "value": cur["value"], "since": cur["updated"], "type": cur["type"]}}, extra=extra)
-        if u.path == "/api/jobs":
-            s = q.get("status", [""])[0] or None
-            if s and s not in ("pending", "running", "done", "failed"):
-                return self.send(400, {"error": "bad status"})
-            lim = max(1, min(int(q.get("limit", ["200"])[0] or 200), 500))
-            js = sorted(jobs(s), key=lambda j: j["id"], reverse=True)[:lim]
-            for j in js:
-                j.pop("key", None)
-            return self.send(200, {"jobs": js})
-        if u.path == "/api/logs":
-            n = max(1, min(int(q.get("n", ["200"])[0] or 200), 1000))
-            return self.send(200, {"lines": tail_log(n, q.get("events", ["0"])[0] == "1", q.get("errors", ["0"])[0] == "1")})
-        if u.path == "/api/config":
-            vals = read_config()
-            return self.send(200, {"values": {k: vals.get(k, v[0]) for k, v in SCHEMA.items()},
-                                   "defaults": {k: v[0] for k, v in SCHEMA.items()},
-                                   "help": {k: v[2] for k, v in SCHEMA.items()},
-                                   "choices": {k: list(v[3]) for k, v in SCHEMA.items() if v[1] == "enum"},
-                                   "custom": sorted(vals)})
-        if u.path == "/api/fennec":
-            n = max(1, min(int(q.get("limit", ["25"])[0] or 25), 50))
-            rc, out = run(["bash", os.path.join(HERE, "q.sh"), "fennec", "--json", str(n)], timeout=20)
-            if rc != 0:
-                return self.send(500, {"error": out or "Failed to read Fennec history"})
-            try:
-                items = json.loads(out or "[]")
-            except ValueError:
-                return self.send(500, {"error": "Invalid Fennec output"})
-            return self.send(200, {"items": items}, extra=extra)
+        try:
+            if u.path in ("/", "/index.html"):
+                with open(os.path.join(HERE, "webui.html"), "rb") as f:
+                    return self.send(200, f.read(), "text/html", extra)
+            if u.path == "/api/status":
+                js = jobs()
+                st = {s: 0 for s in ("pending", "running", "done", "failed")}
+                for j in js:
+                    st[j["status"]] += 1
+                running = [
+                    {"id": j["id"], "value": j["value"], "since": j["updated"], "type": j["type"]}
+                    for j in js
+                    if j["status"] == "running"
+                ]
+                cur = running[0] if running else None
+                return self.send(
+                    200,
+                    {"stats": st, "worker": worker_state(), "now": time.time(), "current": cur, "running": running},
+                    extra=extra,
+                )
+            if u.path == "/api/jobs":
+                s = q.get("status", [""])[0] or None
+                if s and s not in ("pending", "running", "done", "failed"):
+                    return self.send(400, {"error": "bad status"})
+                lim = _parse_int(q.get("limit", ["200"])[0], 200, 1, 500, "limit")
+                js = sorted(jobs(s), key=lambda j: j["id"], reverse=True)[:lim]
+                for j in js:
+                    j.pop("key", None)
+                return self.send(200, {"jobs": js})
+            if u.path == "/api/logs":
+                n = _parse_int(q.get("n", ["200"])[0], 200, 1, 1000, "n")
+                return self.send(
+                    200,
+                    {"lines": tail_log(n, q.get("events", ["0"])[0] == "1", q.get("errors", ["0"])[0] == "1")},
+                )
+            if u.path == "/api/config":
+                vals = read_config()
+                return self.send(
+                    200,
+                    {
+                        "values": {k: vals.get(k, v[0]) for k, v in SCHEMA.items()},
+                        "defaults": {k: v[0] for k, v in SCHEMA.items()},
+                        "help": {k: v[2] for k, v in SCHEMA.items()},
+                        "choices": {k: list(v[3]) for k, v in SCHEMA.items() if v[1] == "enum"},
+                        "custom": sorted(vals),
+                    },
+                )
+            if u.path == "/api/fennec":
+                n = _parse_int(q.get("limit", ["25"])[0], 25, 1, 50, "limit")
+                rc, out = run(["bash", os.path.join(HERE, "q.sh"), "fennec", "--json", str(n)], timeout=20)
+                if rc != 0:
+                    return self.send(500, {"error": out or "Failed to read Fennec history"})
+                try:
+                    items = json.loads(out or "[]")
+                except ValueError:
+                    return self.send(500, {"error": "Invalid Fennec output"})
+                return self.send(200, {"items": items}, extra=extra)
+        except ValueError as e:
+            return self.send(400, {"error": str(e)})
+        except OSError as e:
+            return self.send(500, {"error": "storage error: %s" % e})
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -286,7 +357,10 @@ class H(BaseHTTPRequestHandler):
                 rc, out = qctl("remove", str(int(b["id"])))
                 return self.send(200, {"ok": rc == 0, "msg": out})
             if path == "/api/clear":
-                st = [s for s in b.get("statuses", []) if s in ("done", "failed")]
+                raw_st = b.get("statuses", [])
+                if not isinstance(raw_st, list):
+                    raise ValueError("statuses must be a list")
+                st = [s for s in raw_st if s in ("done", "failed")]
                 if not st:
                     return self.send(400, {"error": "choose done and/or failed"})
                 rc, out = qctl("clear", *st)
@@ -301,10 +375,13 @@ class H(BaseHTTPRequestHandler):
                 cur = read_config()
                 if b.get("reset"):
                     cur = {}
-                for k, v in (b.get("values") or {}).items():
+                updates = b.get("values")
+                if updates is not None and not isinstance(updates, dict):
+                    raise ValueError("values must be an object")
+                for k, v in (updates or {}).items():
                     v = validate(k, v)
                     if v == SCHEMA[k][0]:
-                        cur.pop(k, None)          # equal to default: keep the file minimal
+                        cur.pop(k, None)
                     else:
                         cur[k] = v
                 write_config(cur)
@@ -318,15 +395,18 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     if "-h" in sys.argv or "--help" in sys.argv:
-        print(__doc__); return
+        print(__doc__)
+        return
     if not LOOPBACK:
         os.makedirs(DATA_DIR, exist_ok=True)
         tp = os.path.join(DATA_DIR, "webui.token")
         if not os.path.exists(tp):
             fd = os.open(tp, os.O_WRONLY | os.O_CREAT, 0o600)
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(secrets.token_urlsafe(24))
-        print("Token for other devices: open  http://<phone-ip>:%d/?t=%s" % (PORT, open(tp).read().strip()), flush=True)
+        with open(tp, encoding="utf-8") as f:
+            tok = f.read().strip()
+        print("Token for other devices: open  http://<phone-ip>:%d/?t=%s" % (PORT, tok), flush=True)
     srv = ThreadingHTTPServer((HOST, PORT), H)
     srv.daemon_threads = True
     print("Web UI on http://%s:%d" % (HOST, PORT), flush=True)

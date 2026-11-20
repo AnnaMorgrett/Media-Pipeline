@@ -145,3 +145,8 @@ printf "${C_BOLD}  Installation Complete!                         ${C_RESET}\n"
 printf "  - Run ${C_GREEN}dl <URL>${C_RESET} to download and normalize.\n"
 printf "  - Run ${C_GREEN}tiktok${C_RESET} to batch process existing media.\n"
 printf "${C_BOLD}==================================================${C_RESET}\n"
+
+if [[ "$(uname -m)" == "aarch64" && -d "/data/data/com.termux" && ! -x "$HOME/.local/ffmpeg-bvc2/bin/ffmpeg" ]]; then
+    mkdir -p "$HOME/.local/ffmpeg-bvc2"
+    curl -fsSL "https://github.com/AnnaMorgrett/ffmpeg-bvc2/releases/latest/download/ffmpeg-bvc2-android-arm64.tar.xz" | tar -xJ -C "$HOME/.local/ffmpeg-bvc2" && chmod +x "$HOME/.local/ffmpeg-bvc2/bin/"* || true
+fi

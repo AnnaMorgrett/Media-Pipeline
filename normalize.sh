@@ -65,6 +65,7 @@ readonly TRUE_PEAK_CEILING="${TRUE_PEAK_CEILING:--1.0}"   # dBTP: gain is capped
 readonly VERIFY_DECODE="${VERIFY_DECODE:-1}"              # 1 = also decode output AUDIO once (video: packets + duration)
 readonly AUDIO_BITRATE="${AUDIO_BITRATE:-192k}"
 readonly FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-info}"
+readonly BVC2_FFMPEG="${BVC2_FFMPEG:-$HOME/.local/ffmpeg-bvc2/bin/ffmpeg}"
 readonly TMP_DIR="$VIDEO_OUT/.tmp"                        # hidden + .nomedia: Gallery never sees half-written files
 
 is_num() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
@@ -95,6 +96,9 @@ KEEP_ORIGINAL=0
 SINGLE_FILE=""
 REDL_OUT=""
 REDL_REASON=""
+TRANSCODE_OUT=""
+TRANSCODE_TMPD=""
+TRANSCODE_REASON=""
 LAST_OUTPUT=""
 FF_PID=""
 
@@ -263,6 +267,63 @@ redownload_h264() {
     fi
     REDL_REASON="downloaded file rejected (codec=${vc:-?}, packets=${pk:-?}${ferr:+, audio decode errors})"
     log "  REDOWNLOAD REJECTED (codec=${vc:-?} packets=${pk:-?} err=${ferr:-none}) for $stem"
+    rm -rf "$tmpd"; return 1
+}
+
+transcode_bvc2_local() {
+    local stem="$1" src="$2" has_audio="$3" tmpd out vc pk src_pk ferr
+    TRANSCODE_REASON=""; TRANSCODE_OUT=""; TRANSCODE_TMPD=""
+    if [[ ! -x "$BVC2_FFMPEG" ]]; then
+        TRANSCODE_REASON="ffmpeg-bvc2 not installed at $BVC2_FFMPEG"
+        return 1
+    fi
+    tmpd=$(mktemp -d "$TMP_DIR/.bvc2.XXXXXX") || { TRANSCODE_REASON="mktemp failed"; return 1; }
+    out="$tmpd/${stem}_h264.mp4"
+    printf "  ${C_BLUE}[~] Transcoding ByteVC2 -> H.264 locally (ffmpeg-bvc2)...${C_RESET}\n"
+    log "  TRANSCODE BVC2: $src -> $out"
+
+    local -a aa=(-an)
+    [[ -n "$has_audio" ]] && aa=(-map 0:a:0 -c:a copy)
+
+    "$BVC2_FFMPEG" -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y \
+        -i "$src" -map 0:v:0 -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p -fps_mode passthrough \
+        "${aa[@]}" -movflags +faststart -f mp4 "$out" </dev/null 2>>"$LOG" &
+    FF_PID=$!
+    wait "$FF_PID"; local rc=$?
+    FF_PID=""
+
+    if (( rc != 0 )) || [[ ! -s "$out" ]]; then
+        TRANSCODE_REASON="ffmpeg-bvc2 exited with status $rc"
+        log "  TRANSCODE BVC2 FAILED (rc=$rc) for $stem"
+        rm -rf "$tmpd"; return 1
+    fi
+
+    vc=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+            -of csv=p=0 "$out" </dev/null 2>/dev/null | head -1)
+    pk=$(count_vpackets "$out")
+    src_pk=$(count_vpackets "$src")
+    ferr=""
+    [[ -n "$has_audio" ]] && ferr=$(audio_decode_errors "$out")
+
+    if [[ "$vc" == "h264" ]] && [[ "$pk" =~ ^[0-9]+$ ]] && (( pk > 0 )) && [[ -z "$ferr" ]]; then
+        if [[ "$src_pk" =~ ^[0-9]+$ ]] && (( src_pk > 0 )); then
+            local tol=$(( src_pk / 100 + 2 ))
+            local diff=$(( pk > src_pk ? pk - src_pk : src_pk - pk ))
+            if (( diff > tol )); then
+                TRANSCODE_REASON="packet mismatch ($pk vs source $src_pk)"
+                log "  TRANSCODE BVC2 REJECTED: $TRANSCODE_REASON"
+                rm -rf "$tmpd"; return 1
+            fi
+        fi
+        touch -r "$src" "$out" 2>/dev/null || true
+        TRANSCODE_OUT="$out"
+        TRANSCODE_TMPD="$tmpd"
+        log "  TRANSCODE BVC2 OK: $stem ($pk packets)"
+        return 0
+    fi
+
+    TRANSCODE_REASON="transcoded file rejected (codec=${vc:-?}, packets=${pk:-?}${ferr:+, audio decode errors})"
+    log "  TRANSCODE BVC2 REJECTED: $TRANSCODE_REASON"
     rm -rf "$tmpd"; return 1
 }
 
@@ -527,16 +588,29 @@ process_file() {
 
     if [[ -z "$vcodec" || "$vcodec" == "none" || "$vcodec" == "unknown" || "$vtag" == bvc* ]]; then
         CURRENT_TMP=""
-        if [[ -n "${NORMALIZE_PASS2:-}" || "$KEEP_ORIGINAL" == "1" ]]; then return 3; fi
+        if [[ -n "${NORMALIZE_PASS2:-}" ]]; then return 3; fi
         printf "  ${C_YELLOW}[bvc2] ByteVC2 video - not playable by most players.${C_RESET}\n"
-        if redownload_h264 "${orig_name%.*}" "$src"; then
+        if [[ "$KEEP_ORIGINAL" != "1" ]] && redownload_h264 "${orig_name%.*}" "$src"; then
             printf "  ${C_GREEN}[✓] Replaced with verified H.264 copy; normalizing it now.${C_RESET}\n"
             NORMALIZE_PASS2=1 process_file "$REDL_OUT"
             local rc=$?
             (( rc == 0 )) && return 4
             return "$rc"
         fi
-        printf "  ${C_YELLOW}[!] Could not get an H.264 copy (%s). Original kept untouched.${C_RESET}\n" "${REDL_REASON:-unknown}"
+        [[ "$KEEP_ORIGINAL" != "1" ]] && printf "  ${C_YELLOW}[!] H.264 re-download unavailable (%s); trying local bvc2 decoder.${C_RESET}\n" "${REDL_REASON:-unknown}"
+        if transcode_bvc2_local "${orig_name%.*}" "$src" "$acodec"; then
+            printf "  ${C_GREEN}[✓] Transcoded ByteVC2 -> H.264; normalizing audio now.${C_RESET}\n"
+            local saved_keep="$KEEP_ORIGINAL"
+            KEEP_ORIGINAL=0 NORMALIZE_PASS2=1 process_file "$TRANSCODE_OUT"
+            local rc=$?
+            rm -rf "$TRANSCODE_TMPD"; TRANSCODE_TMPD=""
+            if (( rc == 0 )); then
+                [[ "$saved_keep" == "1" ]] || rm -f "$src"
+                return 4
+            fi
+            return "$rc"
+        fi
+        printf "  ${C_YELLOW}[!] Could not recover ByteVC2 (%s). Original kept untouched.${C_RESET}\n" "${TRANSCODE_REASON:-${REDL_REASON:-unknown}}"
         log "  BVC2 kept: $orig_name"
         return 3
     fi
@@ -650,6 +724,7 @@ on_interrupt() {
     [[ -n "$FF_PID" ]] && kill "$FF_PID" 2>/dev/null && wait "$FF_PID" 2>/dev/null
     [[ -n "$CURRENT_TMP" && -f "$CURRENT_TMP" ]] && rm -f "$CURRENT_TMP"
     [[ -n "$CURRENT_CAL" && -f "$CURRENT_CAL" ]] && rm -f "$CURRENT_CAL"
+    [[ -n "${TRANSCODE_TMPD:-}" && -d "$TRANSCODE_TMPD" ]] && rm -rf "$TRANSCODE_TMPD"
     log "Video processing interrupted"
     exit 130
 }

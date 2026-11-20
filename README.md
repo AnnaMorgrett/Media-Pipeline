@@ -20,7 +20,7 @@ An automated media ingestion and audio normalization pipeline with a persistent 
 - **Fennec browser sync (`q fennec` & `sync_cookies.sh`):** on rooted Android, reads Fennec history (`places.sqlite`) and session cookies (`cookies.sqlite`) safely via `su -mm` and SQLite online backup while stripping tracking parameters (`__cft__*`, `__tn__`, `fbclid`, `si`, `igsh`, `utm_*`). On unrooted Android, `sync_cookies.sh` imports an exported `Download/cookies.txt` into `data/cookies.txt`.
 - **Two-tier ingestion & image/carousel support:** tries unauthenticated downloads first before falling back to synced browser cookies, uses `curl_cffi` TLS impersonation for protected social endpoints, and routes image/carousel posts through `gallery-dl` into `Pictures/TikTok_Assets/`.
 - **Share to Termux:** share any video link or local video file from any Android app straight into the queue.
-- **Codec-aware & resilient:** compatible video streams are copied untouched (`-c:v copy`), live ByteVC2 (`bvc2`) TikTok files are automatically re-downloaded as standard H.264 when available, and transient network errors auto-retry in `worker.sh`.
+- **Codec-aware & resilient:** compatible video streams are copied untouched (`-c:v copy`), ByteVC2 (`bvc2`) TikTok files are automatically recovered via two-tier fallback (`yt-dlp` H.264 re-download first, local `ffmpeg-bvc2` transcode second), and transient network errors auto-retry in `worker.sh`.
 - **Fail-safe & Gallery-aware:** output is verified with `ffprobe` (plus an optional audio decode pass) before removing the source file, and Android MediaStore scanning works via Termux:API, Shizuku (`rish`), or root (`su`).
 - **Non-video cleanup & rolling log:** images, stickers, and GIFs are relocated to an assets folder, and the pipeline log is capped at 2 MB.
 
@@ -83,6 +83,11 @@ If Git reports `detected dubious ownership` on `/storage/emulated/0/Termux`, whi
 
 ```bash
 git config --global --add safe.directory /storage/emulated/0/Termux
+```
+
+**Step 6 — Install `ffmpeg-bvc2` for offline ByteVC2 decoding (optional, Android ARM64)**
+```bash
+mkdir -p ~/.local/ffmpeg-bvc2 && curl -fL https://github.com/AnnaMorgrett/ffmpeg-bvc2/releases/latest/download/ffmpeg-bvc2-android-arm64.tar.xz | tar -xJ -C ~/.local/ffmpeg-bvc2 && chmod +x ~/.local/ffmpeg-bvc2/bin/*
 ```
 
 ### Windows (PowerShell)
@@ -189,7 +194,7 @@ Compressors and limiters raise quiet audio at the cost of pumping and squashed t
 FAST=1 WORKERS=4 tiktok
 ```
 
-**ByteVC2 (`bvc2`) TikTok files:** Videos saved via the TikTok app's built-in "Save video" button sometimes use ByteDance's proprietary `bvc2` codec, which upstream `ffmpeg` cannot decode. `normalize.sh` detects `bvc2` via `ffprobe` and automatically re-downloads a standard H.264 copy via `yt-dlp` when the post is still live on TikTok. (If the post has already been deleted from TikTok, move the local `bvc2` file out of `DCIM/TikTok/` or transcode it in CapCut / a `ffmpeg-bvc2` build.)
+**ByteVC2 (`bvc2`) TikTok files:** Videos saved via the TikTok app's built-in "Save video" button sometimes use ByteDance's proprietary `bvc2` codec, which upstream `ffmpeg` cannot decode. `normalize.sh` detects `bvc2` via `ffprobe` and automatically re-downloads a standard H.264 copy via `yt-dlp` when the post is still live on TikTok. If the post was deleted, returns `403`, or lacks a TikTok ID, `normalize.sh` falls back to `~/.local/ffmpeg-bvc2/bin/ffmpeg` (`libx264`, `-crf 17 -preset medium`), normalizes audio, and deletes the original `bvc2` file only after verification.
 
 ---
 
@@ -211,6 +216,7 @@ Override settings per run (e.g. `PEAK_PERCENT=90 FAST=1 tiktok`) or persist them
 | `VERIFY_DECODE` | `1` | `1` = decode the encoded output audio stream once to verify frame integrity |
 | `AUDIO_BITRATE` | `192k` | AAC-LC output bitrate (e.g. `192k` or `256k`) |
 | `LOG_MAX_BYTES` | `2097152` | Log size limit in bytes before trimming the oldest half |
+| `BVC2_FFMPEG` | `~/.local/ffmpeg-bvc2/bin/ffmpeg` | Custom `ffmpeg-bvc2` binary for offline ByteVC2 decoding |
 | `MEDIA_DIR` | auto | Root media directory override |
 
 ---
@@ -236,7 +242,7 @@ python3 tests/s2_test.py | tail -1
 - **`master_run.sh`**: the `tiktok` command—updates `yt-dlp`, relocates non-video assets, queues folder videos, and runs the worker.
 - **`update_yt_dlp.sh`**: installs and updates `yt-dlp` on the selected release channel with a 6-hour check interval.
 - **`download.sh`**: two-tier `yt-dlp` download logic (unauthenticated first, cookie fallback second), `curl_cffi` TLS impersonation, and `gallery-dl` image/carousel routing.
-- **`normalize.sh`**: codec inspection, ByteVC2 H.264 recovery, constant-gain calibration, render, and verification.
+- **`normalize.sh`**: codec inspection, two-tier ByteVC2 H.264 recovery (`yt-dlp` re-download + local `ffmpeg-bvc2` transcode), constant-gain calibration, render, and verification.
 - **`move_assets.sh`**: relocates non-video media files to the assets directory.
 - **`scan_lib.sh`**: Android MediaStore scanner supporting Termux:API, Shizuku (`rish`), and root (`su`).
 - **`config_lib.sh`**: safe key-value configuration loader.

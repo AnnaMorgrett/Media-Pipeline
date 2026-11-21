@@ -32,7 +32,7 @@ scan_queue() {
         rc=0
         for (( i=0; i<${#files[@]}; i+=50 )); do
             chunk=("${files[@]:i:50}")
-            if ! out=$(termux-media-scan "${chunk[@]}" </dev/null 2>&1); then
+            if ! out=$($(command -v timeout &>/dev/null && echo "timeout -k 5 30") termux-media-scan "${chunk[@]}" </dev/null 2>&1); then
                 rc=$?
                 err_out="$out"
             fi

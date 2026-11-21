@@ -69,6 +69,7 @@ readonly BVC2_FFMPEG="${BVC2_FFMPEG:-$HOME/.local/ffmpeg-bvc2/bin/ffmpeg}"
 readonly TMP_DIR="$VIDEO_OUT/.tmp"                        # hidden + .nomedia: Gallery never sees half-written files
 
 is_num() { [[ "$1" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; }
+run_tmo() { local s="$1"; shift; if command -v timeout &>/dev/null; then timeout -k 5 "$s" "$@"; else "$@"; fi; }
 if ! is_num "$TARGET_LUFS" || ! is_num "$TRUE_PEAK_CEILING"; then
     echo "[FATAL] TARGET_LUFS and TRUE_PEAK_CEILING must be numbers" >&2
     exit 64
@@ -183,7 +184,7 @@ scan_queue() {
         rc=0
         for (( i=0; i<${#files[@]}; i+=50 )); do
             chunk=("${files[@]:i:50}")
-            out=$(termux-media-scan "${chunk[@]}" </dev/null 2>&1) || rc=$?
+            out=$(run_tmo 30 termux-media-scan "${chunk[@]}" </dev/null 2>&1) || rc=$?
         done
     elif command -v am &>/dev/null; then
         rc=0
@@ -234,13 +235,15 @@ redownload_h264() {
             [[ -x "$_NORM_DIR/sync_cookies.sh" ]] && bash "$_NORM_DIR/sync_cookies.sh" >/dev/null 2>&1 || true
             [[ -s "$cookie_file" ]] && cookie_args=(--cookies "$cookie_file")
         fi
-        yt-dlp --no-mtime "${cookie_args[@]}" -S "vcodec:h264,res,acodec:m4a" \
+        run_tmo 45 yt-dlp --no-mtime --socket-timeout 10 --retries 1 --fragment-retries 1 \
+               "${cookie_args[@]}" -S "vcodec:h264,res,acodec:m4a" \
                -f "b[vcodec^=h264][format_id!=download]/b[vcodec~='^(h265|hevc)'][format_id!=download]" \
                -o "$tmpd/%(id)s.%(ext)s" "$url" </dev/null > "$tmpd/yt.log" 2>&1
         cat "$tmpd/yt.log" >> "$LOG" 2>/dev/null
         out=$(find "$tmpd" -maxdepth 1 -type f -name '*.mp4' | head -1)
         [[ -n "$out" ]] && break
-        (( attempt == 1 )) && { printf "  ${C_YELLOW}[~] Retrying once...${C_RESET}\n"; sleep 3; }
+        grep -Eq "HTTP Error (403|404)|Video unavailable|Private video|account is private" "$tmpd/yt.log" 2>/dev/null && break
+        (( attempt == 1 )) && { printf "  ${C_YELLOW}[~] Retrying once...${C_RESET}\n"; sleep 2; }
     done
     if [[ -z "$out" ]]; then
         ytmsg=$(grep -E "ERROR|WARNING" "$tmpd/yt.log" | tail -1 | cut -c1-160)
@@ -285,7 +288,7 @@ transcode_bvc2_local() {
     local -a aa=(-an)
     [[ -n "$has_audio" ]] && aa=(-map 0:a:0 -c:a copy)
 
-    "$BVC2_FFMPEG" -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y \
+    run_tmo 300 "$BVC2_FFMPEG" -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y \
         -i "$src" -map 0:v:0 -c:v libx264 -preset medium -crf 17 -pix_fmt yuv420p -fps_mode passthrough \
         "${aa[@]}" -movflags +faststart -f mp4 "$out" </dev/null 2>>"$LOG" &
     FF_PID=$!
@@ -387,7 +390,7 @@ video_duration() {  # video stream duration, falling back to container duration
 }
 
 audio_decode_errors() {  # prints up to 3 error lines (empty = clean)
-    ffmpeg -v error -nostdin -i "$1" -map 0:a:0 -f null - </dev/null 2>&1 | head -3
+    run_tmo 45 ffmpeg -v error -nostdin -i "$1" -map 0:a:0 -f null - </dev/null 2>&1 | head -3
 }
 
 # ── Loudness: constant linear gain with true-peak cap (NO compression/limiter) ─
@@ -396,7 +399,7 @@ compute_gain() {
     local src="$1" stats tp
     GAIN_DB="0.00"; GAIN_CAPPED=0
     # -vn + explicit audio map: measure audio only (no video decoding)
-    stats=$(ffmpeg -hide_banner -nostdin -nostats -i "$src" -vn -map 0:a:0 \
+    stats=$(run_tmo 45 ffmpeg -hide_banner -nostdin -nostats -i "$src" -vn -map 0:a:0 \
                    -af loudnorm=print_format=json -f null - </dev/null 2>&1)
     MEASURED_I=$(printf '%s' "$stats" | grep '"input_i"' | head -1 | sed 's/.*: *"//;s/".*//')
     tp=$(printf '%s' "$stats" | grep '"input_tp"' | head -1 | sed 's/.*: *"//;s/".*//')
@@ -413,7 +416,7 @@ compute_gain() {
 # ── Peak mode: percentage target, constant gain, FORCED ──────────────────────
 # Overall sample peak (dBFS) of the first audio stream: a number, "-inf" for digital silence, or empty if unreadable.
 peak_db() {
-    ffmpeg -hide_banner -nostdin -nostats -i "$1" -vn -map 0:a:0 -af astats=metadata=0:reset=0 -f null - </dev/null 2>&1 |
+    run_tmo 45 ffmpeg -hide_banner -nostdin -nostats -i "$1" -vn -map 0:a:0 -af astats=metadata=0:reset=0 -f null - </dev/null 2>&1 |
         awk '/Overall/ {o=1} o && /Peak level dB:/ {print $NF; exit}'
 }
 
@@ -438,7 +441,7 @@ calibrate_peak() {
     local src="$1" cal="$TMP_DIR/.cal.$$.mp4" br k rc pk err derr aerr g best_g="$GAIN_DB" bbest bbest_g i tries=0
     local fb_err=999 fb_g="" fb_br="" fb_pk="" fb_e=""
     local -a brs=("$AUDIO_BITRATE") offs=(0.03 -0.03 0.06 -0.06 0.10 -0.10 0.15)
-    for i in 256k 320k; do awk -v a="${AUDIO_BITRATE%k}" -v b="${i%k}" 'BEGIN{exit !(b>a)}' && brs+=("$i"); done
+    for i in 320k; do awk -v a="${AUDIO_BITRATE%k}" -v b="${i%k}" 'BEGIN{exit !(b>a)}' && brs+=("$i"); done
     # The target is a CEILING: the output peak must never be above it. Accepted: 0 .. PEAK_TOLERANCE dB BELOW target
     # (error = target - peak, so 0 <= error <= tol). We aim at the middle of that window.
     local half; half=$(awk -v t="$PEAK_TOLERANCE" 'BEGIN{printf "%.4f", t/2}')
@@ -447,7 +450,7 @@ calibrate_peak() {
     CURRENT_CAL="$cal"
     for br in "${brs[@]}"; do
         g="$best_g"; bbest=999; bbest_g="$g"; k=0
-        while (( k < 8 )); do
+        while (( k < 5 )); do
             (( ++k, ++tries ))
             rm -f "$cal"
             ffmpeg -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y -i "$src" -vn -map 0:a:0 \
@@ -501,7 +504,7 @@ run_ffmpeg() {
         *)     aa=(-an) ;;
     esac
     # Run as a tracked child so a kill/TERM of this script stops ffmpeg immediately.
-    ffmpeg -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y \
+    run_tmo 180 ffmpeg -hide_banner -nostdin -nostats -loglevel "$FFMPEG_LOGLEVEL" -y \
         -i "$src" -map 0:v:0 "${va[@]}" "${aa[@]}" \
         -movflags +faststart -f mp4 "$tmp" </dev/null 2>>"$LOG" &
     FF_PID=$!
@@ -721,7 +724,7 @@ process_file() {
 
 # ── Cleanup Handler ───────────────────────────────────────────────────────────
 on_interrupt() {
-    [[ -n "$FF_PID" ]] && kill "$FF_PID" 2>/dev/null && wait "$FF_PID" 2>/dev/null
+    [[ -n "$FF_PID" ]] && { kill -TERM "$FF_PID" 2>/dev/null; sleep 0.3; kill -KILL "$FF_PID" 2>/dev/null; wait "$FF_PID" 2>/dev/null; }
     [[ -n "$CURRENT_TMP" && -f "$CURRENT_TMP" ]] && rm -f "$CURRENT_TMP"
     [[ -n "$CURRENT_CAL" && -f "$CURRENT_CAL" ]] && rm -f "$CURRENT_CAL"
     [[ -n "${TRANSCODE_TMPD:-}" && -d "$TRANSCODE_TMPD" ]] && rm -rf "$TRANSCODE_TMPD"

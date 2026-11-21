@@ -49,6 +49,7 @@ source "$SCRIPT_DIR/scan_lib.sh"
 # shellcheck source=config_lib.sh
 if [[ -f "$SCRIPT_DIR/config_lib.sh" ]]; then source "$SCRIPT_DIR/config_lib.sh"; load_config "${PIPELINE_CONFIG:-$SCRIPT_DIR/data/config.conf}"; fi
 WORKERS="${WORKERS:-2}"; [[ "$WORKERS" =~ ^[1-4]$ ]] || WORKERS=2
+JOB_TIMEOUT="${JOB_TIMEOUT:-600}"; [[ "$JOB_TIMEOUT" =~ ^[0-9]+$ ]] && (( JOB_TIMEOUT >= 30 )) || JOB_TIMEOUT=600
 
 for bin in "$PY" ffmpeg ffprobe awk; do
     command -v "$bin" &>/dev/null || { printf "${C_RED}[FATAL] '%s' not found in PATH${C_RESET}\n" "$bin" >&2; exit 1; }
@@ -62,10 +63,16 @@ fi
 
 # ── Single worker: atomic mkdir lock with PID; a dead owner's lock is taken over ──
 acquire_lock() {
-    local owner
+    local owner state cmd
     if mkdir "$LOCK" 2>/dev/null; then echo $$ > "$LOCK/pid"; return 0; fi
     owner=$(cat "$LOCK/pid" 2>/dev/null || true)
-    if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then return 1; fi
+    if [[ -n "$owner" ]] && kill -0 "$owner" 2>/dev/null; then
+        state=$(awk '/^State:/{print $2}' "/proc/$owner/status" 2>/dev/null || true)
+        cmd=$(tr '\0' ' ' < "/proc/$owner/cmdline" 2>/dev/null || true)
+        if [[ "$state" != "Z" ]] && { [[ -z "$cmd" ]] || [[ "$cmd" == *worker.sh* ]]; }; then
+            return 1
+        fi
+    fi
     log "Stale worker lock (pid ${owner:-?}) removed"
     rm -rf "$LOCK"
     mkdir "$LOCK" 2>/dev/null && echo $$ > "$LOCK/pid"
@@ -81,14 +88,20 @@ CHILD=""; WAKE=0; declare -A SLOT=()
 wake_on()  { command -v termux-wake-lock &>/dev/null && termux-wake-lock 2>/dev/null && WAKE=1; return 0; }
 wake_off() { (( WAKE )) && termux-wake-unlock 2>/dev/null; WAKE=0; return 0; }
 kill_tree() {
-    local pid="$1" c
-    for c in $(pgrep -P "$pid" 2>/dev/null || true); do kill_tree "$c"; done
-    kill -TERM "$pid" 2>/dev/null || true
+    local pid="$1" sig="${2:-TERM}" c
+    for c in $(pgrep -P "$pid" 2>/dev/null || true); do kill_tree "$c" "$sig"; done
+    kill "-$sig" "$pid" 2>/dev/null || true
+}
+kill_tree_force() {
+    local pid="$1"
+    kill_tree "$pid" TERM
+    sleep 0.3
+    kill_tree "$pid" KILL
 }
 on_signal() {
     local p
     for p in "${!SLOT[@]}"; do
-        kill_tree "$p"
+        kill_tree_force "$p"
         wait "$p" 2>/dev/null || true
         qctl_retry requeue "${SLOT[$p]}"
         log "Interrupted; job ${SLOT[$p]} put back in the queue"
@@ -211,19 +224,44 @@ slot_body() {   # slot_body ID TYPE KEEP VALUE ARGS
     fi
 }
 start_slot() {  # start_slot ID TYPE KEEP VALUE ARGS
-    local outf="$QUEUE_DIR/.out.$1"
+    local jid="$1" outf="$QUEUE_DIR/.out.$1" tmo_f="$QUEUE_DIR/.timeout.$1"
+    rm -f "$tmo_f"
     (
-        local_me=$BASHPID; WATCH=""
-        trap '[[ -n "$CHILD" ]] && kill_tree "$CHILD"; [[ -n "$WATCH" ]] && kill "$WATCH" 2>/dev/null; wait 2>/dev/null; exit 143' INT TERM HUP
+        local_me=$BASHPID; WATCH=""; TIMER=""
+        on_slot_term() {
+            [[ -n "$TIMER" ]] && kill "$TIMER" 2>/dev/null || true
+            [[ -n "$WATCH" ]] && kill "$WATCH" 2>/dev/null || true
+            [[ -n "$CHILD" ]] && kill_tree_force "$CHILD"
+            wait 2>/dev/null || true
+            if [[ -f "$tmo_f" ]]; then
+                rm -f "$tmo_f" "$outf"
+                qctl_retry fail "$jid" "job timed out after ${JOB_TIMEOUT}s"
+                echo fail >> "$CNT"
+                log "Job $jid FAILED: timed out after ${JOB_TIMEOUT}s"
+                printf "${C_RED}[job %s] failed: timed out after %ss${C_RESET}\n" "$jid" "$JOB_TIMEOUT"
+                exit 124
+            fi
+            exit 143
+        }
+        trap on_slot_term INT TERM HUP
         trap - EXIT
         ( while kill -0 "$$" 2>/dev/null; do sleep 2; done; kill -TERM "$local_me" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
         WATCH=$!
+        (
+            sleep "$JOB_TIMEOUT"
+            : > "$tmo_f" 2>/dev/null || true
+            kill -TERM "$local_me" 2>/dev/null || true
+            sleep 3
+            kill -KILL "$local_me" 2>/dev/null || true
+        ) </dev/null >/dev/null 2>&1 &
+        TIMER=$!
         if (( WORKERS > 1 )); then
             slot_body "$@" > "$outf" 2>&1; cat "$outf"; rm -f "$outf"
         else
             slot_body "$@"
         fi
-        kill "$WATCH" 2>/dev/null || true
+        kill "$TIMER" "$WATCH" 2>/dev/null || true
+        rm -f "$tmo_f"
     ) &
     SLOT[$!]="$1"
 }

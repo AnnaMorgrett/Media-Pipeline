@@ -37,7 +37,7 @@ run_ytdlp() {
     [[ -n "${DL_RESULT_FILE:-}" ]] && result_args=(--print-to-file "after_move:filepath" "$DL_RESULT_FILE")
     : > "$TMP_LOG"
     set +e
-    yt-dlp -S "vcodec:h264,res,acodec:m4a" -P "$DL_DIR" -o "%(title).100B [%(id)s].%(ext)s" \
+    yt-dlp --socket-timeout 15 --retries 2 --fragment-retries 2 -S "vcodec:h264,res,acodec:m4a" -P "$DL_DIR" -o "%(title).100B [%(id)s].%(ext)s" \
         "${auth_args[@]}" "${result_args[@]}" "${EXTRA_ARGS[@]}" \
         "$url" > >(tee -a "$TMP_LOG") 2> >(tee -a "$TMP_LOG" >&2) &
     YT_PID=$!; wait "$YT_PID"; local rc=$?; YT_PID=""
